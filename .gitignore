@@ -1,0 +1,41 @@
+# 账号密码文件（禁止提交）
+account.ini
+config.ini
+# ===== 运行时生成 =====
+logs/
+des.js
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+env/
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== Windows =====
+Thumbs.db
+Desktop.ini
+
+# ===== 临时文件 =====
+*.tmp
+*.bak
+_radio_task.xml
+_task.xml
+

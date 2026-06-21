@@ -1,0 +1,75 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build exe
+        run: python scripts/build.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CampusNetworkKeeper
+          path: dist/CampusNetworkKeeper.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: CampusNetworkKeeper
+          path: dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CampusNetworkKeeper.exe
+          generate_release_notes: true
+          body: |
+            ## 🌐 Campus Network Keeper ${{ github.ref_name }}
+
+            ### 快速开始
+            1. 下载 `CampusNetworkKeeper.exe`
+            2. 以管理员身份运行: `CampusNetworkKeeper.exe --wizard`
+            3. 按提示输入账号密码，自动完成配置
+            4. 启动托盘: `CampusNetworkKeeper.exe --tray`
+
+            ### 支持的认证系统
+            - Dr.COM + CAS SSO（大连理工、东北大学等）
+            - 锐捷 ePortal（华中科技、西安电子等）
+            - 深澜 Srun（清华、北大、浙大等）
+            - 通用 Web Portal（其他学校）
+
+            ### 命令行参数
+            | 参数 | 说明 |
+            |------|------|
+            | `--wizard` | 首次配置向导 |
+            | `--tray` | 托盘模式 |
+            | `--install` | 安装开机自启 |
+            | `--diagnose` | 网络诊断 |
+            | `--test-login` | 测试登录 |

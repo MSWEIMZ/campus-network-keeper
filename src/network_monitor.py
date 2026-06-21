@@ -1,0 +1,265 @@
+"""
+校园网保活工具 - 网络状态检测模块（带详细日志）
+负责检测：网卡物理状态、IP/DNS、网关连通性、外网连通性、是否需要 Web 认证。
+"""
+from __future__ import annotations
+
+import subprocess
+import time
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Optional
+
+import requests
+
+from config import CONFIG
+from logger import log
+
+
+class NetState(Enum):
+    """网络状态枚举"""
+    ONLINE = auto()              # 正常上网
+    CABLE_DOWN = auto()          # 网线物理断开
+    DHCP_LIMITED = auto()        # 有 IP 但无法上网
+    WEB_AUTH_REQUIRED = auto()   # 需要 Web 认证
+    UNKNOWN = auto()             # 未知
+
+
+@dataclass
+class NetworkSnapshot:
+    """一次网络检测的快照"""
+    state: NetState
+    eth_connected: bool
+    wifi_connected: bool
+    has_ip: bool
+    gateway: Optional[str]
+    gateway_reachable: bool
+    internet_reachable: bool
+    auth_probe_ok: bool
+    detail: str = ""
+
+
+# ---------------------------------------------------------------------------
+# 底层工具函数
+# ---------------------------------------------------------------------------
+
+def _run(cmd: str, timeout: int = 10) -> str:
+    """运行 shell 命令并返回 stdout"""
+    try:
+        r = subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=timeout
+        )
+        for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
+            try:
+                return (r.stdout + r.stderr).decode(enc)
+            except (UnicodeDecodeError, AttributeError):
+                continue
+        return str(r.stdout + r.stderr)
+    except subprocess.TimeoutExpired:
+        return "[timeout]"
+    except Exception as e:
+        return f"[error] {e}"
+
+
+def _ping(host: str, count: int = 1, timeout_ms: int = 2000) -> bool:
+    """Windows ping"""
+    out = _run(f"ping -n {count} -w {timeout_ms} {host}")
+    ok = "TTL=" in out.upper() or "来自" in out
+    log.info("[探测:ping] %s → %s", host, "可达" if ok else "不可达")
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# 网卡状态
+# ---------------------------------------------------------------------------
+
+def get_adapter_status(adapter_name: str) -> Optional[bool]:
+    """查询指定网卡的连接状态"""
+    out = _run('netsh interface show interface')
+    for line in out.splitlines():
+        if adapter_name.lower() in line.lower():
+            connected = "已连接" in line or "connected" in line.lower()
+            log.info("[探测:网卡] %s → %s | %s", adapter_name, "已连接" if connected else "已断开", line.strip()[:80])
+            return connected
+    return None
+
+
+def is_ethernet_connected() -> bool:
+    """检测以太网是否连接"""
+    name = CONFIG.ethernet_adapter_name
+    if name:
+        status = get_adapter_status(name)
+        if status is not None:
+            return status
+
+    out = _run('netsh interface show interface')
+    for line in out.splitlines():
+        lower = line.lower()
+        if any(kw in lower for kw in ("以太网", "ethernet")):
+            if "已连接" in line or "connected" in lower:
+                log.info("[探测:以太网] 已连接 | %s", line.strip()[:80])
+                return True
+    log.info("[探测:以太网] 未连接")
+    return False
+
+
+def is_wifi_connected() -> bool:
+    """检测 Wi-Fi 是否连接"""
+    name = CONFIG.wifi_adapter_name
+    if name:
+        status = get_adapter_status(name)
+        if status is not None:
+            return status
+
+    out = _run('netsh interface show interface')
+    for line in out.splitlines():
+        lower = line.lower()
+        if any(kw in lower for kw in ("wi-fi", "wlan", "无线")):
+            if "已连接" in line or "connected" in lower:
+                log.info("[探测:Wi-Fi] 已连接 | %s", line.strip()[:80])
+                return True
+    log.info("[探测:Wi-Fi] 未连接")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# IP / 网关
+# ---------------------------------------------------------------------------
+
+def get_default_gateway() -> Optional[str]:
+    """获取默认网关"""
+    import re
+    out = _run("ipconfig")
+    ipv4_pattern = re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})")
+    for line in out.splitlines():
+        stripped = line.strip()
+        if "默认网关" in stripped or "Default Gateway" in stripped:
+            match = ipv4_pattern.search(stripped)
+            if match:
+                gw = match.group(1)
+                if gw != "0.0.0.0":
+                    log.info("[探测:网关] 默认网关: %s", gw)
+                    return gw
+    log.info("[探测:网关] 未找到有效网关")
+    return None
+
+
+def has_ipv4_address() -> bool:
+    """检测是否有非回环 IPv4 地址"""
+    out = _run("ipconfig")
+    for line in out.splitlines():
+        stripped = line.strip()
+        if ("IPv4" in stripped or "IPv4 地址" in stripped) and ":" in stripped:
+            addr = stripped.split(":")[-1].strip()
+            if addr and not addr.startswith("169.254.") and addr != "127.0.0.1":
+                log.info("[探测:IP] 有效 IPv4: %s", addr)
+                return True
+    log.info("[探测:IP] 未找到有效 IPv4 地址")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 外网 / 认证探测
+# ---------------------------------------------------------------------------
+
+def probe_auth_page() -> bool:
+    """
+    探测认证页。
+    返回 True = 认证探测通过（不需要认证）
+    返回 False = 需要认证或无法访问
+    """
+    url = CONFIG.network.auth_probe_url
+    keyword = CONFIG.network.auth_success_keyword
+    log.info("[探测:认证] 访问 %s ...", url)
+    try:
+        resp = requests.get(url, timeout=5, allow_redirects=True)
+        log.info("[探测:认证] HTTP %d, URL=%s, 长度=%d", resp.status_code, resp.url[:100], len(resp.text))
+        if keyword in resp.text:
+            log.info("[探测:认证] ✅ 无需认证 (keyword='%s' found)", keyword)
+            return True
+        log.info("[探测:认证] ⚠️ 需要认证 (keyword='%s' not found)", keyword)
+        log.info("[探测:认证]   响应片段: %s", resp.text[:200])
+        return False
+    except requests.RequestException as e:
+        log.warning("[探测:认证] 请求失败: %s", e)
+        return False
+
+
+def probe_internet() -> bool:
+    """探测外网连通性"""
+    for url in (
+        CONFIG.network.internet_probe_url,
+        CONFIG.network.internet_probe_url_backup,
+    ):
+        log.info("[探测:外网] 访问 %s ...", url)
+        try:
+            resp = requests.get(url, timeout=4, allow_redirects=False)
+            log.info("[探测:外网] HTTP %d", resp.status_code)
+            if resp.status_code in (200, 204, 302):
+                log.info("[探测:外网] ✅ 外网可达")
+                return True
+        except requests.RequestException as e:
+            log.info("[探测:外网] 请求失败: %s", e)
+            continue
+    log.info("[探测:外网] ❌ 外网不可达")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 综合状态判定
+# ---------------------------------------------------------------------------
+
+def take_snapshot() -> NetworkSnapshot:
+    """执行一次完整的网络状态采集"""
+    log.info("[探测] ---- 开始网络状态采集 ----")
+    eth_ok = is_ethernet_connected()
+    wifi_ok = is_wifi_connected()
+    has_ip = has_ipv4_address()
+    gw = get_default_gateway()
+    gw_ok = _ping(gw) if gw else False
+    inet_ok = probe_internet() if has_ip else False
+    auth_ok = probe_auth_page() if has_ip else False
+
+    if not eth_ok and not wifi_ok:
+        state = NetState.CABLE_DOWN
+        detail = "网线和 Wi-Fi 均未连接"
+    elif not has_ip:
+        state = NetState.DHCP_LIMITED
+        detail = "网卡已连接但未获取有效 IP"
+    elif inet_ok or auth_ok:
+        state = NetState.ONLINE
+        detail = "网络正常"
+    else:
+        state = NetState.WEB_AUTH_REQUIRED
+        detail = "外网不通，可能需要认证"
+
+    log.info("[探测] 最终状态: %s (%s)", state.name, detail)
+    log.info("[探测] ---- 采集结束 ----")
+
+    return NetworkSnapshot(
+        state=state,
+        eth_connected=eth_ok,
+        wifi_connected=wifi_ok,
+        has_ip=has_ip,
+        gateway=gw,
+        gateway_reachable=gw_ok,
+        internet_reachable=inet_ok,
+        auth_probe_ok=auth_ok,
+        detail=detail,
+    )
+
+
+def log_snapshot(snap: NetworkSnapshot) -> None:
+    """打印快照日志"""
+    log.info(
+        "网络状态: %s | 网线=%s Wi-Fi=%s IP=%s 网关=%s(%s) 外网=%s 认证=%s | %s",
+        snap.state.name,
+        snap.eth_connected,
+        snap.wifi_connected,
+        snap.has_ip,
+        snap.gateway or "-",
+        snap.gateway_reachable,
+        snap.internet_reachable,
+        snap.auth_probe_ok,
+        snap.detail,
+    )
