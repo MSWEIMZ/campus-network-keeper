@@ -11,9 +11,26 @@ from enum import Enum, auto
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from config import CONFIG
 from logger import log
+
+# 模块级共享 session（避免每次探测都创建新连接）
+_probe_session: requests.Session | None = None
+
+
+def _get_probe_session() -> requests.Session:
+    """获取共享的探测 session（延迟初始化）"""
+    global _probe_session
+    if _probe_session is None:
+        _probe_session = requests.Session()
+        _probe_session.headers["User-Agent"] = "CampusKeeper/1.0"
+        adapter = HTTPAdapter(pool_connections=2, pool_maxsize=2)
+        _probe_session.mount("http://", adapter)
+        _probe_session.mount("https://", adapter)
+    return _probe_session
 
 
 class NetState(Enum):
@@ -172,7 +189,7 @@ def probe_auth_page() -> bool:
     keyword = CONFIG.network.auth_success_keyword
     log.info("[探测:认证] 访问 %s ...", url)
     try:
-        resp = requests.get(url, timeout=5, allow_redirects=True)
+        resp = _get_probe_session().get(url, timeout=5, allow_redirects=True)
         log.info("[探测:认证] HTTP %d, URL=%s, 长度=%d", resp.status_code, resp.url[:100], len(resp.text))
         if keyword in resp.text:
             log.info("[探测:认证] ✅ 无需认证 (keyword='%s' found)", keyword)
@@ -193,7 +210,7 @@ def probe_internet() -> bool:
     ):
         log.info("[探测:外网] 访问 %s ...", url)
         try:
-            resp = requests.get(url, timeout=4, allow_redirects=False)
+            resp = _get_probe_session().get(url, timeout=4, allow_redirects=False)
             log.info("[探测:外网] HTTP %d", resp.status_code)
             if resp.status_code in (200, 204, 302):
                 log.info("[探测:外网] ✅ 外网可达")
@@ -210,8 +227,22 @@ def probe_internet() -> bool:
 # ---------------------------------------------------------------------------
 
 def take_snapshot() -> NetworkSnapshot:
-    """执行一次完整的网络状态采集"""
+    """执行一次完整的网络状态采集（带异常保护）"""
     log.info("[探测] ---- 开始网络状态采集 ----")
+    try:
+        return _do_take_snapshot()
+    except Exception as e:
+        log.error("[探测] ❌ 状态采集异常: %s", e)
+        return NetworkSnapshot(
+            state=NetState.UNKNOWN, eth_connected=False, wifi_connected=False,
+            has_ip=False, gateway=None, gateway_reachable=False,
+            internet_reachable=False, auth_probe_ok=False,
+            detail=f"采集异常: {e}",
+        )
+
+
+def _do_take_snapshot() -> NetworkSnapshot:
+    """实际的状态采集逻辑"""
     eth_ok = is_ethernet_connected()
     wifi_ok = is_wifi_connected()
     has_ip = has_ipv4_address()
@@ -229,9 +260,27 @@ def take_snapshot() -> NetworkSnapshot:
     elif inet_ok or auth_ok:
         state = NetState.ONLINE
         detail = "网络正常"
+    elif not gw_ok:
+        # 网关 ping 不通
+        if not eth_ok and wifi_ok:
+            # WiFi 在线但网关不可达 → 很可能是需要 portal 认证
+            state = NetState.WEB_AUTH_REQUIRED
+            detail = "WiFi 已连接但网关不通，可能需要认证"
+        elif eth_ok and not wifi_ok:
+            # 以太网"已连接"但网关不通 → 物理层可能异常
+            state = NetState.DHCP_LIMITED
+            detail = "网线已连接但网关不通（可能物理层异常）"
+        elif not eth_ok:
+            state = NetState.CABLE_DOWN
+            detail = "网线断开且外网不通"
+        else:
+            # 双网卡都在但都不通 → 可能需要认证
+            state = NetState.WEB_AUTH_REQUIRED
+            detail = "双网卡在线但网关不通，可能需要认证"
     else:
+        # 网关可达但外网不通 → 判定为需要认证
         state = NetState.WEB_AUTH_REQUIRED
-        detail = "外网不通，可能需要认证"
+        detail = "网关可达但外网不通，可能需要认证"
 
     log.info("[探测] 最终状态: %s (%s)", state.name, detail)
     log.info("[探测] ---- 采集结束 ----")
@@ -263,3 +312,7 @@ def log_snapshot(snap: NetworkSnapshot) -> None:
         snap.auth_probe_ok,
         snap.detail,
     )
+
+
+
+
