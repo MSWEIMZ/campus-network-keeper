@@ -61,7 +61,7 @@ class TestStrDec:
 
     def test_roundtrip_triple_key(self):
         """加密→解密应还原原文（三密钥，DLUT CAS 模式）"""
-        original = "32517073@WMZ17772078190hhLT-abc123"
+        original = "testuser123@testpass456LT-abc123"
         encrypted = str_enc(original, "1", "2", "3")
         decrypted = str_dec(encrypted, "1", "2", "3")
         assert decrypted.rstrip('\x00') == original
@@ -88,7 +88,7 @@ class TestDlutCasIntegration:
         """模拟 CAS 登录中的 rsa 字段生成
         rsa = strEnc(username + password + lt, '1', '2', '3')
         """
-        username = "32517073"
+        username = "testuser123"
         password = "testpass123"
         lt = "LT-1234567890abcdef-cas"
 
