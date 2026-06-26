@@ -1,0 +1,129 @@
+"""网络状态判定逻辑测试（mock 外部调用，只测状态机逻辑）"""
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from network_monitor import NetState, NetworkSnapshot, take_snapshot
+
+
+class TestNetStateEnum:
+    def test_all_states_exist(self):
+        assert hasattr(NetState, 'ONLINE')
+        assert hasattr(NetState, 'CABLE_DOWN')
+        assert hasattr(NetState, 'DHCP_LIMITED')
+        assert hasattr(NetState, 'WEB_AUTH_REQUIRED')
+        assert hasattr(NetState, 'UNKNOWN')
+
+    def test_states_are_unique(self):
+        states = [NetState.ONLINE, NetState.CABLE_DOWN, NetState.DHCP_LIMITED,
+                  NetState.WEB_AUTH_REQUIRED, NetState.UNKNOWN]
+        assert len(set(states)) == 5
+
+
+class TestSnapshotDetermination:
+
+    @patch('network_monitor.probe_auth_page', return_value=True)
+    @patch('network_monitor.probe_internet', return_value=True)
+    @patch('network_monitor._ping', return_value=True)
+    @patch('network_monitor.get_default_gateway', return_value='172.29.0.1')
+    @patch('network_monitor.has_ipv4_address', return_value=True)
+    @patch('network_monitor.is_wifi_connected', return_value=False)
+    @patch('network_monitor.is_ethernet_connected', return_value=True)
+    def test_ethernet_online(self, *mocks):
+        snap = take_snapshot()
+        assert snap.state == NetState.ONLINE
+
+    @patch('network_monitor.probe_auth_page', return_value=False)
+    @patch('network_monitor.probe_internet', return_value=False)
+    @patch('network_monitor._ping', return_value=False)
+    @patch('network_monitor.get_default_gateway', return_value=None)
+    @patch('network_monitor.has_ipv4_address', return_value=False)
+    @patch('network_monitor.is_wifi_connected', return_value=False)
+    @patch('network_monitor.is_ethernet_connected', return_value=False)
+    def test_cable_down(self, *mocks):
+        snap = take_snapshot()
+        assert snap.state == NetState.CABLE_DOWN
+
+    @patch('network_monitor.probe_auth_page', return_value=False)
+    @patch('network_monitor.probe_internet', return_value=False)
+    @patch('network_monitor._ping', return_value=False)
+    @patch('network_monitor.get_default_gateway', return_value='172.29.0.1')
+    @patch('network_monitor.has_ipv4_address', return_value=False)
+    @patch('network_monitor.is_wifi_connected', return_value=True)
+    @patch('network_monitor.is_ethernet_connected', return_value=False)
+    def test_dhcp_limited(self, *mocks):
+        snap = take_snapshot()
+        assert snap.state == NetState.DHCP_LIMITED
+
+    @patch('network_monitor.probe_auth_page', return_value=True)
+    @patch('network_monitor.probe_internet', return_value=False)
+    @patch('network_monitor._ping', return_value=True)
+    @patch('network_monitor.get_default_gateway', return_value='172.29.0.1')
+    @patch('network_monitor.has_ipv4_address', return_value=True)
+    @patch('network_monitor.is_wifi_connected', return_value=True)
+    @patch('network_monitor.is_ethernet_connected', return_value=False)
+    def test_auth_probe_pass_means_online(self, *mocks):
+        snap = take_snapshot()
+        assert snap.state == NetState.ONLINE
+
+    @patch('network_monitor.probe_auth_page', return_value=False)
+    @patch('network_monitor.probe_internet', return_value=False)
+    @patch('network_monitor._ping', return_value=True)
+    @patch('network_monitor.get_default_gateway', return_value='172.29.0.1')
+    @patch('network_monitor.has_ipv4_address', return_value=True)
+    @patch('network_monitor.is_wifi_connected', return_value=True)
+    @patch('network_monitor.is_ethernet_connected', return_value=False)
+    def test_gateway_ok_but_no_internet_means_auth_required(self, *mocks):
+        """网关可达+外网不通 → 才判定为需要认证"""
+        snap = take_snapshot()
+        assert snap.state == NetState.WEB_AUTH_REQUIRED
+
+    @patch('network_monitor.probe_auth_page', return_value=False)
+    @patch('network_monitor.probe_internet', return_value=False)
+    @patch('network_monitor._ping', return_value=False)
+    @patch('network_monitor.get_default_gateway', return_value='172.29.0.1')
+    @patch('network_monitor.has_ipv4_address', return_value=True)
+    @patch('network_monitor.is_wifi_connected', return_value=False)
+    @patch('network_monitor.is_ethernet_connected', return_value=True)
+    def test_eth_connected_but_gateway_unreachable_is_dhcp_limited(self, *mocks):
+        """网线已连接+有IP+但网关不通 → DHCP_LIMITED（不是WEB_AUTH！）"""
+        snap = take_snapshot()
+        assert snap.state == NetState.DHCP_LIMITED
+
+    @patch('network_monitor.probe_auth_page', return_value=False)
+    @patch('network_monitor.probe_internet', return_value=False)
+    @patch('network_monitor._ping', return_value=False)
+    @patch('network_monitor.get_default_gateway', return_value=None)
+    @patch('network_monitor.has_ipv4_address', return_value=True)
+    @patch('network_monitor.is_wifi_connected', return_value=True)
+    @patch('network_monitor.is_ethernet_connected', return_value=False)
+    def test_wifi_only_gateway_unreachable_is_auth_required(self, *mocks):
+        """WiFi连接+有IP+网关不可达 → WEB_AUTH_REQUIRED（WiFi物理层正常，需要认证）"""
+        snap = take_snapshot()
+        assert snap.state == NetState.WEB_AUTH_REQUIRED
+
+    @patch('network_monitor.probe_auth_page', side_effect=Exception("timeout"))
+    @patch('network_monitor.probe_internet', side_effect=Exception("timeout"))
+    @patch('network_monitor._ping', return_value=False)
+    @patch('network_monitor.get_default_gateway', return_value=None)
+    @patch('network_monitor.has_ipv4_address', return_value=True)
+    @patch('network_monitor.is_wifi_connected', return_value=True)
+    @patch('network_monitor.is_ethernet_connected', return_value=True)
+    def test_exception_returns_unknown(self, *mocks):
+        snap = take_snapshot()
+        assert snap.state == NetState.UNKNOWN
+
+
+class TestSnapshotDataclass:
+    def test_snapshot_fields(self):
+        snap = NetworkSnapshot(
+            state=NetState.ONLINE,
+            eth_connected=True, wifi_connected=False,
+            has_ip=True, gateway="172.29.0.1",
+            gateway_reachable=True, internet_reachable=True,
+            auth_probe_ok=True, detail="正常",
+        )
+        assert snap.state == NetState.ONLINE
+        assert snap.detail == "正常"
