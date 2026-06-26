@@ -554,6 +554,13 @@ def str_enc(data, first_key, second_key, third_key):
     DES 加密字符串，返回十六进制字符串
     行为与 JS 的 strEnc 完全一致
     """
+    # None 保护：将 None 密钥视为空字符串
+    first_key = first_key or ""
+    second_key = second_key or ""
+    third_key = third_key or ""
+    data = data or ""
+    if not data:
+        return ""
     leng = len(data)
     enc_data = ""
     first_key_bt = None
@@ -603,6 +610,7 @@ def str_enc(data, first_key, second_key, third_key):
                         for x in range(first_length):
                             temp_bt = enc(temp_bt, first_key_bt[x])
                         enc_byte = temp_bt
+            if enc_byte is None: enc_byte = temp_bt if 'temp_bt' in dir() else temp_byte
             enc_data = bt64_to_hex(enc_byte)
         else:
             iterator = int(leng / 4)
@@ -638,6 +646,7 @@ def str_enc(data, first_key, second_key, third_key):
                             for x in range(first_length):
                                 temp_bt = enc(temp_bt, first_key_bt[x])
                             enc_byte = temp_bt
+                if enc_byte is None: enc_byte = temp_bt if 'temp_bt' in dir() else temp_byte
                 enc_data += bt64_to_hex(enc_byte)
 
             if remainder > 0:
@@ -670,6 +679,7 @@ def str_enc(data, first_key, second_key, third_key):
                             for x in range(first_length):
                                 temp_bt = enc(temp_bt, first_key_bt[x])
                             enc_byte = temp_bt
+                if enc_byte is None: enc_byte = temp_bt if 'temp_bt' in dir() else temp_byte
                 enc_data += bt64_to_hex(enc_byte)
 
     return enc_data
@@ -738,3 +748,5 @@ def str_dec(data, first_key, second_key, third_key):
         dec_str += byte_to_string(dec_byte)
 
     return dec_str
+
+
