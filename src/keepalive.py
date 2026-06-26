@@ -1,4 +1,4 @@
-﻿"""
+"""
 校园网保活工具 - 主循环调度器
 核心逻辑：定期检测网络 → 判定状态 → 执行恢复动作。
 """
@@ -118,7 +118,7 @@ class KeepAlive:
                 self._retry_count, int(wait),
             )
             time.sleep(wait)
-            self._retry_count = 0
+            # 不重置 retry_count，让退避间隔递增直到网络恢复正常
 
         self._retry_count += 1
 
@@ -212,3 +212,5 @@ class KeepAlive:
                 log.warning("认证登录后网络状态: %s", new_snap.state.name)
         else:
             log.error("❌ 认证登录失败")
+
+
