@@ -84,9 +84,16 @@ def _is_normal_response(resp: requests.Response, probe_url: str) -> bool:
     # msftconnecttest 正常返回 "Microsoft Connect Test"
     if "connecttest" in probe_url and "Microsoft Connect Test" in resp.text:
         return True
-    # generate_204 正常返回 204 或空 body
-    if "generate_204" in probe_url and resp.status_code in (204, 200) and len(resp.text) < 100:
-        return True
+    # generate_204 正常返回 204 或空 body（且 URL 没被劫持）
+    if "generate_204" in probe_url:
+        if resp.status_code == 204 and len(resp.text) < 100:
+            return True
+        # URL 被重定向到认证页了 → 不是正常响应
+        if resp.url != probe_url and not resp.url.startswith(probe_url.split("?")[0]):
+            return False
+        if resp.status_code == 200 and len(resp.text) < 100:
+            return True
+        return False
     # 如果最终 URL 和探测 URL 相同，说明没被重定向
     if resp.url == probe_url or resp.url.rstrip("/") == probe_url.rstrip("/"):
         return True
