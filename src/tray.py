@@ -5,13 +5,31 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
+import traceback
 from typing import Optional
 
+import requests
 from config import CONFIG
 from logger import log
 from network_monitor import log_snapshot, NetState, take_snapshot
+
+
+def _global_exception_handler(exc_type, exc_value, exc_tb):
+    """全局未捕获异常处理器——写日志后不退出"""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    log.error("[全局] 未捕获异常: %s: %s", exc_type.__name__, exc_value)
+    log.error("[全局] 堆栈:\n%s", "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+    # 强制刷新日志，确保异常信息写盘
+    for _h in log.handlers:
+        try: _h.flush()
+        except Exception: pass
+
+sys.excepthook = _global_exception_handler
 
 try:
     import pystray
@@ -21,8 +39,13 @@ except ImportError:
     HAS_TRAY = False
 
 
+_ICON_CACHE: dict[str, "Image.Image"] = {}
+
+
 def _create_icon_image(color: str = "green") -> "Image.Image":
-    """生成一个圆形托盘图标"""
+    """生成一个圆形托盘图标（带缓存，避免重复创建）"""
+    if color in _ICON_CACHE:
+        return _ICON_CACHE[color]
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     colors = {
@@ -33,6 +56,7 @@ def _create_icon_image(color: str = "green") -> "Image.Image":
     }
     fill = colors.get(color, colors["gray"])
     draw.ellipse([8, 8, 56, 56], fill=fill)
+    _ICON_CACHE[color] = img
     return img
 
 
@@ -105,22 +129,35 @@ class TrayApp:
             self._update_status("未配置账号密码", "red")
             log.warning("[托盘] 未配置账号密码，请检查 account.ini")
 
-    def _do_login(self, u, p):
-        """执行登录（后台线程）"""
+    def _do_login(self, u, p) -> bool:
+        """执行登录（返回 True/False）"""
         log.info("[托盘:登录] ====== 开始登录 ======")
+        # 先快速检查：DNS 能解析吗？不能则直接失败，不浪费时间
+        import socket
+        try:
+            socket.setdefaulttimeout(3)
+            socket.getaddrinfo("sso.dlut.edu.cn", 443)
+        except (socket.gaierror, OSError):
+            log.error("[托盘:登录] ❌ DNS 解析失败，网络完全不通，跳过登录")
+            self._update_status("网络不通", "red")
+            return False
+
         try:
             from campus_auth import CampusAuth
-            auth = CampusAuth()
-            ok = auth.login(u, p)
+            if self._auth is None:
+                self._auth = CampusAuth()
+            ok = self._auth.login(u, p)
             if ok:
                 log.info("[托盘:登录] ✅ 登录成功")
                 self._update_status("已认证", "green")
             else:
                 log.error("[托盘:登录] ❌ 登录失败")
                 self._update_status("登录失败", "red")
+            return ok
         except Exception as e:
             log.error("[托盘:登录] ❌ 登录异常: %s", e, exc_info=True)
             self._update_status("登录异常", "red")
+            return False
 
     def _on_manual_logout(self, icon, item):
         """手动登出"""
@@ -196,7 +233,20 @@ class TrayApp:
     # ------------------------------------------------------------------
 
     def _keepalive_loop(self) -> None:
-        """后台保活线程"""
+        """后台保活线程（带看门狗：卡住超过120秒强制重启进程）"""
+        self._loop_heartbeat = time.time()
+
+        def _watchdog():
+            while self._running:
+                time.sleep(30)
+                if time.time() - self._loop_heartbeat > 120:
+                    log.error("[看门狗] 保活循环卡住超过120秒，强制重启进程...")
+                    for h in log.handlers:
+                        try: h.flush()
+                        except Exception: pass
+                    os._exit(1)
+
+        threading.Thread(target=_watchdog, daemon=True).start()
         log.info("[保活] 后台保活线程启动")
         log.info("[保活] 轮询间隔: %ds, 防抖次数: %d", CONFIG.network.poll_interval_sec, CONFIG.network.confirm_count)
 
@@ -249,14 +299,57 @@ class TrayApp:
                         elif snap.state == NetState.WEB_AUTH_REQUIRED:
                             if CONFIG.auth.enabled:
                                 self._update_status("需要认证，登录中...", "yellow")
-                                self._do_login(CONFIG.auth.username, CONFIG.auth.password)
+                                if not self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                                    log.warning("[保活] 认证登录失败，尝试网络恢复...")
+                                    self._recover_auth_failed()
                             else:
                                 self._update_status("需要认证（未启用）", "red")
 
             except Exception as e:
                 log.error("[保活] ❌ 保活循环异常: %s", e, exc_info=True)
                 self._update_status("运行异常", "red")
+                time.sleep(5)
 
+            # 关闭并重建探测 session，避免连接池/GDI 资源长期累积泄漏
+            try:
+                import network_monitor as _nm
+                if _nm._probe_session is not None:
+                    try:
+                        _nm._probe_session.close()
+                    except Exception:
+                        pass
+                    _nm._probe_session = None
+            except Exception:
+                pass
+
+            # 定期清理 auth session（每30分钟重建一次，避免连接池老化）
+            try:
+                if self._auth is not None and hasattr(self._auth, "_auth"):
+                    auth_inner = self._auth._auth
+                    if auth_inner is not None and hasattr(auth_inner, "_session"):
+                        import time as _t
+                        if not hasattr(self, "_last_session_reset"):
+                            self._last_session_reset = _t.time()
+                        if _t.time() - self._last_session_reset > 1800:
+                            try:
+                                auth_inner._session.close()
+                                auth_inner._session = requests.Session()
+                                auth_inner._session.headers.update({
+                                    "User-Agent": (
+                                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                        "Chrome/125.0.0.0 Safari/537.36"
+                                    ),
+                                })
+                                self._last_session_reset = _t.time()
+                                log.info("[保活] 已重建认证 session（30分钟定期清理）")
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # 更新看门狗心跳
+            self._loop_heartbeat = time.time()
             time.sleep(CONFIG.network.poll_interval_sec)
 
     def _recover_cable_down(self) -> None:
@@ -296,47 +389,196 @@ class TrayApp:
             elif snap2.state == NetState.WEB_AUTH_REQUIRED:
                 log.info("[恢复:网线] Wi-Fi 已连接但需要认证")
                 if CONFIG.auth.enabled:
-                    self._do_login(CONFIG.auth.username, CONFIG.auth.password)
+                    if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                        return
+                    log.warning("[恢复:网线] 认证失败，尝试重置网卡后重试...")
+                # WiFi 连上但认证失败，可能需要重置网卡刷新 IP
+                reset_ethernet()
+                time.sleep(5)
+                snap3 = take_snapshot()
+                if snap3.state == NetState.ONLINE:
+                    self._update_status("在线 (Wi-Fi)", "green")
+                    return
+                if snap3.state == NetState.WEB_AUTH_REQUIRED and CONFIG.auth.enabled:
+                    if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                        return
                 return
 
         log.error("[恢复:网线] ❌ 所有恢复手段均失败")
         self._update_status("恢复失败", "red")
 
-    def _recover_dhcp_limited(self) -> None:
-        """DHCP 异常恢复"""
-        log.warning("[恢复:DHCP] 开始刷新 DHCP...")
+    def _recover_dhcp_limited(self, snap=None) -> None:
+        """DHCP 异常恢复（区分以太网和 WiFi 场景）"""
+        if snap is None:
+            snap = take_snapshot()
+
+        # WiFi 在线但网关不通 → 不要 reset_ethernet（会把 WiFi 也断了）
+        # 而是先尝试认证登录
+        if snap.wifi_connected and not snap.eth_connected:
+            log.warning("[恢复:DHCP] WiFi 在线但无法上网，尝试认证...")
+            self._update_status("WiFi 需要认证...", "yellow")
+            if CONFIG.auth.enabled:
+                if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                    return
+            # 认证失败，可能是 WiFi 信号问题
+            log.warning("[恢复:DHCP] 认证失败，尝试重连 WiFi...")
+            from wifi_switcher import auto_connect_preferred_wifi
+            auto_connect_preferred_wifi()
+            time.sleep(5)
+            snap2 = take_snapshot()
+            if snap2.state == NetState.ONLINE:
+                self._update_status("在线 (Wi-Fi)", "green")
+                self._consecutive_abnormal = 0
+            return
+
+        # 以太网场景：重置网卡
+        log.warning("[恢复:DHCP] 以太网 DHCP 异常，开始刷新...")
         from nic_reset import reset_ethernet
         self._update_status("刷新 DHCP...", "yellow")
         reset_ethernet()
         time.sleep(3)
         snap = take_snapshot()
         log.info("[恢复:DHCP] 刷新后状态: %s", snap.state.name)
+        if snap.state == NetState.WEB_AUTH_REQUIRED:
+            if CONFIG.auth.enabled:
+                self._do_login(CONFIG.auth.username, CONFIG.auth.password)
+
+    def _recover_auth_failed(self) -> None:
+        """认证登录失败后的恢复：尝试网卡重置 + 切换 WiFi"""
+        from nic_reset import reset_ethernet
+        from wifi_switcher import auto_connect_preferred_wifi
+
+        # Step1: 尝试重置网卡
+        log.warning("[恢复:认证失败] Step1: 尝试重置网卡...")
+        self._update_status("重置网卡中...", "yellow")
+        reset_ok = reset_ethernet()
+        if reset_ok:
+            time.sleep(5)
+            snap = take_snapshot()
+            log.info("[恢复:认证失败] 重置后状态: %s", snap.state.name)
+            if snap.state == NetState.ONLINE:
+                log.info("[恢复:认证失败] ✅ 网卡重置后恢复成功")
+                self._update_status("在线", "green")
+                self._consecutive_abnormal = 0
+                return
+            if snap.state == NetState.WEB_AUTH_REQUIRED:
+                log.info("[恢复:认证失败] 重置后需要认证，再次尝试登录...")
+                if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                    return
+
+        # Step2: 切换 WiFi
+        log.warning("[恢复:认证失败] Step2: 切换 Wi-Fi...")
+        self._update_status("切换 Wi-Fi...", "yellow")
+        wifi_ok = auto_connect_preferred_wifi()
+        if wifi_ok:
+            time.sleep(5)
+            snap2 = take_snapshot()
+            log.info("[恢复:认证失败] WiFi连接后状态: %s", snap2.state.name)
+            if snap2.state == NetState.ONLINE:
+                log.info("[恢复:认证失败] ✅ Wi-Fi 切换后恢复成功")
+                self._update_status("在线 (Wi-Fi)", "green")
+                self._consecutive_abnormal = 0
+                return
+            if snap2.state == NetState.WEB_AUTH_REQUIRED:
+                log.info("[恢复:认证失败] WiFi已连接但需要认证...")
+                if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                    return
+
+        log.error("[恢复:认证失败] ❌ 所有恢复手段均失败")
+        self._update_status("恢复失败", "red")
+
+    def _switch_back_to_ethernet(self) -> None:
+        """WiFi 在线时检测到网线恢复，切回网线"""
+        import subprocess
+        log.info("[恢复:网线优先] 断开 Wi-Fi，切回以太网...")
+
+        # Step1: 断开 WiFi
+        try:
+            subprocess.run("netsh wlan disconnect", shell=True, capture_output=True, timeout=10)
+        except Exception as e:
+            log.warning("[恢复:网线优先] 断开WiFi失败: %s", e)
+
+        # Step2: 等待网线接管
+        time.sleep(5)
+        snap = take_snapshot()
+        log.info("[恢复:网线优先] 切换后状态: eth=%s wifi=%s state=%s",
+                 snap.eth_connected, snap.wifi_connected, snap.state.name)
+
+        if snap.state == NetState.ONLINE and snap.eth_connected:
+            log.info("[恢复:网线优先] ✅ 已切回网线")
+            self._update_status("在线", "green")
+            self._consecutive_abnormal = 0
+            return
+
+        if snap.state == NetState.WEB_AUTH_REQUIRED:
+            log.info("[恢复:网线优先] 切回网线后需要认证...")
+            if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                return
+
+        # 切回失败，重新连 WiFi
+        log.warning("[恢复:网线优先] 切回网线失败，重新连接 WiFi...")
+        from wifi_switcher import auto_connect_preferred_wifi
+        auto_connect_preferred_wifi()
+        time.sleep(5)
+        snap2 = take_snapshot()
+        if snap2.state == NetState.ONLINE:
+            self._update_status("在线 (Wi-Fi)", "green")
+            return
+        if snap2.state == NetState.WEB_AUTH_REQUIRED and CONFIG.auth.enabled:
+            if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
+                return
+        # 最终兜底：不管什么状态，标记异常但不卡死，下一轮会继续检测
+        log.warning("[恢复:网线优先] 重新连WiFi后状态: %s，下轮继续检测", snap2.state.name)
+        self._update_status("切回待定", "yellow")
+
 
     def run(self) -> None:
-        """启动托盘应用"""
-        log.info("=" * 60)
-        log.info("[托盘] 启动托盘模式")
-        log.info("[托盘] 账号: %s", CONFIG.auth.username[:3] + "***" if CONFIG.auth.username else "未配置")
-        log.info("[托盘] 认证: %s", "启用" if CONFIG.auth.enabled else "未启用")
-        log.info("[托盘] Wi-Fi: %s", CONFIG.network.wifi_ssids)
-        log.info("[托盘] 检测间隔: %ds", CONFIG.network.poll_interval_sec)
-        log.info("=" * 60)
+        """启动托盘应用（带崩溃保护自动重启）"""
+        MAX_RESTARTS = 5
+        restart_count = 0
 
-        self._update_status("启动中...", "gray")
-        self._icon = pystray.Icon(
-            "campus_keeper",
-            _create_icon_image("gray"),
-            "校园网保活: 启动中...",
-            menu=self._build_menu(),
-        )
+        while restart_count <= MAX_RESTARTS:
+            try:
+                if restart_count > 0:
+                    log.warning("[托盘] ====== 第 %d 次自动重启 ======", restart_count)
 
-        # 后台保活线程
-        bg = threading.Thread(target=self._keepalive_loop, daemon=True)
-        bg.start()
+                log.info("=" * 60)
+                log.info("[托盘] 启动托盘模式")
+                log.info("[托盘] 账号: %s", CONFIG.auth.username[:3] + "***" if CONFIG.auth.username else "未配置")
+                log.info("[托盘] 认证: %s", "启用" if CONFIG.auth.enabled else "未启用")
+                log.info("[托盘] Wi-Fi: %s", CONFIG.network.wifi_ssids)
+                log.info("[托盘] 检测间隔: %ds", CONFIG.network.poll_interval_sec)
+                log.info("=" * 60)
 
-        # 托盘主循环（阻塞）
-        log.info("[托盘] 托盘图标已显示，等待操作...")
-        self._icon.run()
+                self._update_status("启动中...", "gray")
+                self._icon = pystray.Icon(
+                    "campus_keeper",
+                    _create_icon_image("gray"),
+                    "校园网保活: 启动中...",
+                    menu=self._build_menu(),
+                )
+
+                # 后台保活线程
+                self._running = True
+                bg = threading.Thread(target=self._keepalive_loop, daemon=True)
+                bg.start()
+
+                # 托盘主循环（阻塞）
+                log.info("[托盘] 托盘图标已显示，等待操作...")
+                self._icon.run()
+
+                # 正常退出（用户点了退出）
+                log.info("[托盘] 托盘正常退出")
+                break
+
+            except Exception as e:
+                restart_count += 1
+                log.error("[托盘] ❌ 托盘崩溃: %s", e, exc_info=True)
+                log.error("[托盘] 将在 10 秒后自动重启... (第 %d/%d 次)", restart_count, MAX_RESTARTS)
+                time.sleep(10)
+
+        if restart_count > MAX_RESTARTS:
+            log.error("[托盘] ❌ 已达最大重启次数 (%d)，退出", MAX_RESTARTS)
 
 
 def run_tray_app() -> None:
@@ -351,3 +593,17 @@ def run_tray_app() -> None:
 
     app = TrayApp()
     app.run()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
