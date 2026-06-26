@@ -37,6 +37,12 @@ Every Chinese university student has experienced this:
 | **System Tray** | Runs in background with status indicator (green/yellow/red) |
 | **Auto-Start** | Windows Task Scheduler, runs at login with admin privileges |
 | **Detailed Logging** | Every HTTP request, every state change logged to file |
+| **Cable-First Strategy** | Always prefers ethernet; auto-switches back when cable recovers |
+| **Crash Protection** | Watchdog thread force-restarts on hang; auto-restart on crash (up to 5x) |
+| **Resource Leak Prevention** | Session pool rebuilt every cycle; auth session refreshed every 30min |
+| **Smart State Detection** | Distinguishes cable-down / DHCP-failure / portal-auth accurately |
+| **DNS Fast-Fail** | Skips login attempts when DNS is completely broken (3s timeout) |
+| **TDD Test Suite** | 34 unit tests covering crypto, state detection, and auth system identification |
 
 ### Supported Auth Systems
 
@@ -84,17 +90,22 @@ python main.py --install
 ```
 Every 10 seconds:
   |
-  +-- Check: cable connected?
-  |     NO -> wait 5s confirm -> reset NIC -> still no? -> connect Wi-Fi
-  |
-  +-- Check: has IP?
-  |     NO -> release/renew DHCP
+  +-- Check: cable + Wi-Fi status
+  |     Both OFF -> wait 5s confirm -> reset NIC -> still no? -> connect Wi-Fi
+  |     Wi-Fi only + no gateway -> try portal auth (don't reset NIC!)
+  |     Ethernet "connected" but gateway unreachable -> reset NIC (physical issue)
   |
   +-- Check: can reach internet?
-  |     NO -> check: captive portal?
-  |              YES -> auto-login -> verify -> done
+  |     NO -> DNS ok? -> try portal login
+  |     NO -> DNS broken? -> skip login, wait for recovery
+  |     Login failed? -> reset NIC + switch Wi-Fi + retry
+  |
+  +-- Online via Wi-Fi + ethernet recovers?
+  |     YES -> disconnect Wi-Fi -> switch back to ethernet (cable-first!)
   |
   +-- All OK -> heartbeat (every 60s) -> update traffic info
+  |
+  +-- Watchdog: if loop hangs >120s -> force restart process
 ```
 
 ---
@@ -138,6 +149,11 @@ Devices: 3
 ## Project Structure
 
 ```
+tests/
+  conftest.py          Test fixtures
+  test_des_crypto.py   DES encryption tests
+  test_network_monitor.py  Network state detection tests
+  test_auth_detector.py    Auth system identification tests
 src/
   main.py              Entry point
   config.py            Config management (config.ini + env vars)
@@ -182,7 +198,7 @@ A: `python main.py --uninstall`, then delete the folder.
 
 ## Contributing
 
-Currently tested at DUT (Dalian University of Technology). If your school uses a different auth system, please open an issue with:
+Currently tested at DUT (Dalian University of Technology) with Dr.COM + CAS SSO. If your school uses a different auth system, please open an issue with:
 1. The URL you get redirected to when disconnected
 2. The login form fields (F12 -> Network -> find the POST request)
 3. What a successful login looks like
