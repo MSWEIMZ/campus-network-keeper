@@ -449,10 +449,16 @@ class DrComAuth(BaseAuth):
             if "baseMoney" in info:
                 info["balance_str"] = f"{info.get('baseMoney', 0)}元"
 
-            log.info("[认证:DrCOM:流量] 查询完成: used=%s remain=%s",
-                     info.get("used_str", "N/A"), info.get("remain_str", "N/A"))
+            # 只记录流量摘要，不输出完整 dict（含密码、手机号等敏感信息）
+            log.info("[认证:DrCOM:流量] 查询完成: used=%s remain=%s total=%s balance=%s",
+                     info.get("used_str", "N/A"),
+                     info.get("remain_str", "N/A"),
+                     info.get("total_str", "N/A"),
+                     info.get("balance_str", "N/A"))
 
         except Exception as e:
             log.error("[认证:DrCOM:流量] 查询失败: %s", e, exc_info=True)
 
         return info
+
+
