@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Campus_Network_Keeper-v1.0.3-blue?style=for-the-badge" alt="version">
+  <img src="https://img.shields.io/badge/Campus_Network_Keeper-v1.0.4-blue?style=for-the-badge" alt="version">
 </p>
 
 <p align="center">
@@ -84,8 +84,8 @@ WiFi 软件关闭？自动开启射频
 <td>
 
 ### 🧪 TDD 测试覆盖
-34 个单元测试：  
-DES 加密 · 状态判定 · 认证系统识别  
+45 个单元测试：<br>
+DES 加密 · 状态判定 · 认证系统识别 · 托盘生命周期<br>
 `pytest tests/ -v` 全绿
 
 </td>
