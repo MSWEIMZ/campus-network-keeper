@@ -6,6 +6,7 @@
   python main.py --diagnose     # 网络诊断
   python main.py --test-login   # 测试认证登录
   python main.py --test-logout  # 测试登出
+  python main.py --smoke-test   # 验证打包运行时依赖
   python main.py --wizard       # 首次配置向导`n  python main.py --install      # 安装开机自启（需管理员）
   python main.py --uninstall    # 卸载开机自启
 """
@@ -118,6 +119,22 @@ def test_logout() -> None:
     auth = CampusAuth()
     auth.logout()
     log.info("登出后认证状态: %s", "已认证" if auth.is_authenticated() else "未认证")
+
+
+def smoke_test() -> None:
+    """导入冻结程序的关键运行路径，不访问网络或修改系统状态。"""
+    import keepalive  # noqa: F401
+    import tray  # noqa: F401
+    import network_monitor  # noqa: F401
+    import campus_auth  # noqa: F401
+    import auth.base  # noqa: F401
+    import auth.detector  # noqa: F401
+    import auth.drcom  # noqa: F401
+    import auth.portal  # noqa: F401
+    import auth.ruijie  # noqa: F401
+    import auth.srun  # noqa: F401
+
+    print("SMOKE_TEST_OK")
 
 
 def install_autostart() -> None:
@@ -278,6 +295,8 @@ def main() -> None:
         test_login()
     elif "--test-logout" in args:
         test_logout()
+    elif "--smoke-test" in args:
+        smoke_test()
     elif "--install" in args:
         install_autostart()
     elif "--uninstall" in args:
