@@ -1,4 +1,4 @@
-"""
+﻿"""
 校园网保活工具 - 系统托盘常驻模块（带详细日志）
 使用 pystray + PIL 实现 Windows 系统托盘图标。
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import ctypes
 import time
 import traceback
 from typing import Optional
@@ -40,6 +41,31 @@ except ImportError:
 
 
 _ICON_CACHE: dict[str, "Image.Image"] = {}
+_INSTANCE_MUTEX = None
+
+
+def _release_instance_mutex() -> None:
+    """释放单实例锁；重启子进程前必须先调用。"""
+    global _INSTANCE_MUTEX
+    if _INSTANCE_MUTEX:
+        try:
+            ctypes.windll.kernel32.CloseHandle(_INSTANCE_MUTEX)
+        finally:
+            _INSTANCE_MUTEX = None
+
+
+def _restart_current_process() -> None:
+    """释放单实例锁后启动替代进程。"""
+    import subprocess
+
+    python_exe = sys.executable
+    script = os.path.abspath(sys.argv[0]) if sys.argv else ""
+    args = sys.argv[1:] if len(sys.argv) > 1 else ["--tray"]
+    _release_instance_mutex()
+    subprocess.Popen(
+        [python_exe, script] + args,
+        creationflags=subprocess.DETACHED_PROCESS,
+    )
 
 
 def _create_icon_image(color: str = "green") -> "Image.Image":
@@ -74,6 +100,10 @@ class TrayApp:
         self._auth = None
         self._last_state: Optional[NetState] = None
         self._consecutive_abnormal: int = 0
+        self._pending_abnormal: Optional[NetState] = None
+        self._user_initiated_exit = False
+        self._using_wifi_fallback = False
+        self._ethernet_stable_count = 0
 
     def _update_status(self, text: str, color: str = "green") -> None:
         """更新状态并刷新托盘图标"""
@@ -132,16 +162,6 @@ class TrayApp:
     def _do_login(self, u, p) -> bool:
         """执行登录（返回 True/False）"""
         log.info("[托盘:登录] ====== 开始登录 ======")
-        # 先快速检查：DNS 能解析吗？不能则直接失败，不浪费时间
-        import socket
-        try:
-            socket.setdefaulttimeout(3)
-            socket.getaddrinfo("sso.dlut.edu.cn", 443)
-        except (socket.gaierror, OSError):
-            log.error("[托盘:登录] ❌ DNS 解析失败，网络完全不通，跳过登录")
-            self._update_status("网络不通", "red")
-            return False
-
         try:
             from campus_auth import CampusAuth
             if self._auth is None:
@@ -178,14 +198,19 @@ class TrayApp:
             self._update_status("登出失败", "red")
 
     def _on_exit(self, icon, item):
-        """退出"""
-        log.info("[托盘] 用户点击: 退出")
+        """退出（仅菜单点击触发）"""
+        self._user_initiated_exit = True
+        try:
+            import traceback
+            log.info("[托盘] 菜单退出触发，调用栈:\n%s", "".join(traceback.format_stack()))
+        except Exception:
+            pass
         self._running = False
         if self._icon:
             self._icon.stop()
 
     def _format_traffic_tooltip(self) -> str:
-        """格式化流量信息用于 tooltip"""
+        """格式化流量信息用于 tooltip。"""
         info = self._traffic_info
         if not info:
             return ""
@@ -244,6 +269,14 @@ class TrayApp:
                     for h in log.handlers:
                         try: h.flush()
                         except Exception: pass
+                    log.error("[看门狗] 释放单实例锁并启动替代进程")
+                    for h in log.handlers:
+                        try: h.flush()
+                        except Exception: pass
+                    try:
+                        _restart_current_process()
+                    except Exception:
+                        log.exception("[看门狗] 启动替代进程失败")
                     os._exit(1)
 
         threading.Thread(target=_watchdog, daemon=True).start()
@@ -264,7 +297,14 @@ class TrayApp:
                 if snap.state == NetState.ONLINE:
                     self._update_status("在线", "green")
                     self._consecutive_abnormal = 0
+                    self._pending_abnormal = None
                     self._update_traffic_info()
+
+                    if self._should_switch_back_to_ethernet(
+                        snap.eth_connected, snap.wifi_connected
+                    ):
+                        self._switch_back_to_ethernet()
+                        continue
 
                     # 认证保活心跳
                     if CONFIG.auth.enabled:
@@ -277,7 +317,11 @@ class TrayApp:
                             self._do_login(CONFIG.auth.username, CONFIG.auth.password)
 
                 else:
-                    self._consecutive_abnormal += 1
+                    if snap.state != self._pending_abnormal:
+                        self._pending_abnormal = snap.state
+                        self._consecutive_abnormal = 1
+                    else:
+                        self._consecutive_abnormal += 1
                     log.warning("[保活] 异常检测 #%d/%d: %s",
                                 self._consecutive_abnormal, CONFIG.network.confirm_count, snap.state.name)
 
@@ -295,7 +339,7 @@ class TrayApp:
                             self._recover_cable_down()
                         elif snap.state == NetState.DHCP_LIMITED:
                             self._update_status("DHCP 异常，刷新中...", "yellow")
-                            self._recover_dhcp_limited()
+                            self._recover_dhcp_limited(snap)
                         elif snap.state == NetState.WEB_AUTH_REQUIRED:
                             if CONFIG.auth.enabled:
                                 self._update_status("需要认证，登录中...", "yellow")
@@ -384,6 +428,7 @@ class TrayApp:
             snap2 = take_snapshot()
             if snap2.state == NetState.ONLINE:
                 log.info("[恢复:网线] ✅ Wi-Fi 切换后恢复成功")
+                self._using_wifi_fallback = True
                 self._update_status("在线 (Wi-Fi)", "green")
                 return
             elif snap2.state == NetState.WEB_AUTH_REQUIRED:
@@ -391,17 +436,8 @@ class TrayApp:
                 if CONFIG.auth.enabled:
                     if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
                         return
-                    log.warning("[恢复:网线] 认证失败，尝试重置网卡后重试...")
-                # WiFi 连上但认证失败，可能需要重置网卡刷新 IP
-                reset_ethernet()
-                time.sleep(5)
-                snap3 = take_snapshot()
-                if snap3.state == NetState.ONLINE:
-                    self._update_status("在线 (Wi-Fi)", "green")
-                    return
-                if snap3.state == NetState.WEB_AUTH_REQUIRED and CONFIG.auth.enabled:
-                    if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
-                        return
+                    log.warning("[恢复:网线] Wi-Fi 认证失败，保留 Wi-Fi 连接等待下轮重试")
+                    self._update_status("Wi-Fi 认证待重试", "yellow")
                 return
 
         log.error("[恢复:网线] ❌ 所有恢复手段均失败")
@@ -508,6 +544,8 @@ class TrayApp:
             log.info("[恢复:网线优先] ✅ 已切回网线")
             self._update_status("在线", "green")
             self._consecutive_abnormal = 0
+            self._using_wifi_fallback = False
+            self._ethernet_stable_count = 0
             return
 
         if snap.state == NetState.WEB_AUTH_REQUIRED:
@@ -522,6 +560,7 @@ class TrayApp:
         time.sleep(5)
         snap2 = take_snapshot()
         if snap2.state == NetState.ONLINE:
+            self._using_wifi_fallback = True
             self._update_status("在线 (Wi-Fi)", "green")
             return
         if snap2.state == NetState.WEB_AUTH_REQUIRED and CONFIG.auth.enabled:
@@ -530,6 +569,19 @@ class TrayApp:
         # 最终兜底：不管什么状态，标记异常但不卡死，下一轮会继续检测
         log.warning("[恢复:网线优先] 重新连WiFi后状态: %s，下轮继续检测", snap2.state.name)
         self._update_status("切回待定", "yellow")
+
+    def _should_switch_back_to_ethernet(
+        self, eth_connected: bool, wifi_connected: bool
+    ) -> bool:
+        """仅在 Wi-Fi 兜底期间且网线连续三轮稳定时切回。"""
+        if not self._using_wifi_fallback:
+            self._ethernet_stable_count = 0
+            return False
+        if not eth_connected or not wifi_connected:
+            self._ethernet_stable_count = 0
+            return False
+        self._ethernet_stable_count += 1
+        return self._ethernet_stable_count >= 3
 
 
     def run(self) -> None:
@@ -568,7 +620,10 @@ class TrayApp:
                 self._icon.run()
 
                 # 正常退出（用户点了退出）
-                log.info("[托盘] 托盘正常退出")
+                if self._user_initiated_exit:
+                    log.info("[托盘] 托盘正常退出：用户通过菜单点击退出")
+                else:
+                    log.warning("[托盘] 托盘退出：非菜单触发（系统消息/图标被关闭）")
                 break
 
             except Exception as e:
@@ -583,6 +638,16 @@ class TrayApp:
 
 def run_tray_app() -> None:
     """供 main.py 调用的入口"""
+    global _INSTANCE_MUTEX
+    _mutex_name = "CampusNetworkKeeper_SingleInstance_Mutex"
+    mutex = ctypes.windll.kernel32.CreateMutexW(0, False, _mutex_name)
+    last_err = ctypes.windll.kernel32.GetLastError()
+    ERROR_ALREADY_EXISTS = 183
+    if last_err == ERROR_ALREADY_EXISTS:
+        log.warning("[托盘] 检测到已有实例运行，跳过本次启动")
+        ctypes.windll.kernel32.CloseHandle(mutex)
+        return
+    _INSTANCE_MUTEX = mutex
     if not HAS_TRAY:
         log.warning("[托盘] pystray/Pillow 未安装，回退到命令行模式")
         log.warning("[托盘] 安装: pip install pystray Pillow")
@@ -591,19 +656,8 @@ def run_tray_app() -> None:
         keeper.run()
         return
 
-    app = TrayApp()
-    app.run()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    try:
+        app = TrayApp()
+        app.run()
+    finally:
+        _release_instance_mutex()

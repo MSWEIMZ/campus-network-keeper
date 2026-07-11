@@ -52,8 +52,12 @@ class CampusAuth:
             log.info("[认证] 自动探测认证系统...")
             system_type, redirect_url, _ = detect_auth_system()
             if system_type == AuthSystemType.UNKNOWN:
-                log.warning("[认证] 无法识别认证系统，回退到 Dr.COM")
-                system_type = AuthSystemType.DRCOM
+                # 在线状态和暂时无法访问认证页时都可能得到 UNKNOWN。
+                # 此时猜测 Dr.COM 会让其他学校在后续掉线时使用错误模板；
+                # 保持未初始化，让下一次真正出现 Portal 时重新探测。
+                log.info("[认证] 当前未发现认证页面，暂不锁定认证模板")
+                self._initialized = False
+                return None
             self._auth_type = system_type
             self._auth = create_auth_instance(system_type, auth_config)
         else:

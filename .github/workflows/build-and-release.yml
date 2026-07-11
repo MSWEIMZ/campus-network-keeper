@@ -1,6 +1,9 @@
 name: Build and Release
 
 on:
+  pull_request:
+    branches:
+      - master
   push:
     tags:
       - 'v*'
@@ -21,7 +24,13 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pyinstaller
+        run: pip install -r requirements.txt pyinstaller pytest
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Compile check
+        run: python -m compileall -q src tests
 
       - name: Build exe
         run: python scripts/build.py

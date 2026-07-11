@@ -23,6 +23,7 @@ class KeepAlive:
         self._consecutive_abnormal: int = 0
         self._retry_count: int = 0
         self._last_state: NetState = NetState.UNKNOWN
+        self._pending_abnormal: NetState = NetState.UNKNOWN
 
         # 从环境变量或配置读取账号密码
         self._username = os.environ.get("CAMPUS_USER", CONFIG.auth.username)
@@ -82,6 +83,7 @@ class KeepAlive:
         self._consecutive_abnormal = 0
         self._retry_count = 0
         self._last_state = NetState.ONLINE
+        self._pending_abnormal = NetState.UNKNOWN
 
         # 认证保活心跳
         if CONFIG.auth.enabled:
@@ -95,7 +97,11 @@ class KeepAlive:
     # ------------------------------------------------------------------
 
     def _handle_abnormal(self, snap: NetworkSnapshot) -> None:
-        self._consecutive_abnormal += 1
+        if snap.state != self._pending_abnormal:
+            self._pending_abnormal = snap.state
+            self._consecutive_abnormal = 1
+        else:
+            self._consecutive_abnormal += 1
         self._last_state = snap.state
 
         # 防抖
