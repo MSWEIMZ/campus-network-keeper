@@ -1,11 +1,32 @@
 """网络状态判定逻辑测试（mock 外部调用，只测状态机逻辑）"""
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from network_monitor import NetState, NetworkSnapshot, take_snapshot
+from network_monitor import (
+    NetState,
+    NetworkSnapshot,
+    get_adapter_status,
+    probe_internet,
+    take_snapshot,
+)
+
+
+class TestProbeSemantics:
+    @patch("network_monitor._get_probe_session")
+    def test_captive_portal_redirect_is_not_internet(self, get_session):
+        response = Mock(status_code=302, headers={"Location": "http://portal/login"})
+        get_session.return_value.get.return_value = response
+
+        assert probe_internet() is False
+
+    @patch("network_monitor._run")
+    def test_english_disconnected_adapter_is_not_connected(self, run):
+        run.return_value = "Enabled  Disconnected  Dedicated  Ethernet"
+
+        assert get_adapter_status("Ethernet") is False
 
 
 class TestNetStateEnum:

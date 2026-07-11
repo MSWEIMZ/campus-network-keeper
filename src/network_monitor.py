@@ -95,7 +95,11 @@ def get_adapter_status(adapter_name: str) -> Optional[bool]:
     out = _run('netsh interface show interface')
     for line in out.splitlines():
         if adapter_name.lower() in line.lower():
-            connected = "已连接" in line or "connected" in line.lower()
+            lower = line.lower()
+            connected = (
+                "已连接" in line
+                or ("connected" in lower and "disconnected" not in lower)
+            )
             log.info("[探测:网卡] %s → %s | %s", adapter_name, "已连接" if connected else "已断开", line.strip()[:80])
             return connected
     return None
@@ -113,7 +117,7 @@ def is_ethernet_connected() -> bool:
     for line in out.splitlines():
         lower = line.lower()
         if any(kw in lower for kw in ("以太网", "ethernet")):
-            if "已连接" in line or "connected" in lower:
+            if "已连接" in line or ("connected" in lower and "disconnected" not in lower):
                 log.info("[探测:以太网] 已连接 | %s", line.strip()[:80])
                 return True
     log.info("[探测:以太网] 未连接")
@@ -132,7 +136,7 @@ def is_wifi_connected() -> bool:
     for line in out.splitlines():
         lower = line.lower()
         if any(kw in lower for kw in ("wi-fi", "wlan", "无线")):
-            if "已连接" in line or "connected" in lower:
+            if "已连接" in line or ("connected" in lower and "disconnected" not in lower):
                 log.info("[探测:Wi-Fi] 已连接 | %s", line.strip()[:80])
                 return True
     log.info("[探测:Wi-Fi] 未连接")
@@ -212,7 +216,9 @@ def probe_internet() -> bool:
         try:
             resp = _get_probe_session().get(url, timeout=4, allow_redirects=False)
             log.info("[探测:外网] HTTP %d", resp.status_code)
-            if resp.status_code in (200, 204, 302):
+            # 204 探针必须返回预期的 204。302 通常正是校园网
+            # Captive Portal 的认证重定向，绝不能视为已经联网。
+            if resp.status_code == 204:
                 log.info("[探测:外网] ✅ 外网可达")
                 return True
         except requests.RequestException as e:
