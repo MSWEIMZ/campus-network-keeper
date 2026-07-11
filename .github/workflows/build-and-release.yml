@@ -35,6 +35,9 @@ jobs:
       - name: Build exe
         run: python scripts/build.py
 
+      - name: Smoke test packaged exe
+        run: dist\CampusNetworkKeeper.exe --help
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
