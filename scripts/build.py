@@ -18,8 +18,7 @@ MAIN_SCRIPT = os.path.join(SRC_DIR, "main.py")
 
 # 排除不需要的模块（减小体积）
 EXCLUDE_MODULES = [
-    "numpy", "setuptools", "pkg_resources", "multiprocessing",
-    "xml", "email", "html", "pydoc", "lib2to3",
+    "numpy", "setuptools", "pkg_resources",
     "tkinter", "_tkinter",
     # Pillow 不需要的图片格式
     "PIL.ImageQt", "PIL.ImageTk",
