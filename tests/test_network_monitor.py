@@ -9,6 +9,7 @@ from network_monitor import (
     NetState,
     NetworkSnapshot,
     get_adapter_status,
+    get_adapter_admin_status,
     probe_internet,
     take_snapshot,
 )
@@ -27,6 +28,14 @@ class TestProbeSemantics:
         run.return_value = "Enabled  Disconnected  Dedicated  Ethernet"
 
         assert get_adapter_status("Ethernet") is False
+
+    @patch("network_monitor._run")
+    def test_disabled_adapter_is_distinguished_from_link_down(self, run):
+        run.return_value = "Enabled  Disconnected  Dedicated  Ethernet"
+        assert get_adapter_admin_status("Ethernet") is True
+
+        run.return_value = "Disabled  Disconnected  Dedicated  Ethernet"
+        assert get_adapter_admin_status("Ethernet") is False
 
 
 class TestNetStateEnum:

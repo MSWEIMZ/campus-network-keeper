@@ -16,6 +16,7 @@ import requests
 from config import CONFIG
 from logger import log
 from network_monitor import log_snapshot, NetState, take_snapshot
+from nic_reset import enable_ethernet_adapter
 
 
 def _global_exception_handler(exc_type, exc_value, exc_tb):
@@ -104,6 +105,8 @@ class TrayApp:
         self._user_initiated_exit = False
         self._using_wifi_fallback = False
         self._ethernet_stable_count = 0
+        self._last_ethernet_enable_attempt = 0.0
+        self._watchdog_timeout_sec = 300
 
     def _update_status(self, text: str, color: str = "green") -> None:
         """更新状态并刷新托盘图标"""
@@ -258,14 +261,17 @@ class TrayApp:
     # ------------------------------------------------------------------
 
     def _keepalive_loop(self) -> None:
-        """后台保活线程（带看门狗：卡住超过120秒强制重启进程）"""
-        self._loop_heartbeat = time.time()
+        """后台保活线程（带阶段心跳的看门狗）。"""
+        self._loop_heartbeat = time.monotonic()
 
         def _watchdog():
             while self._running:
                 time.sleep(30)
-                if time.time() - self._loop_heartbeat > 120:
-                    log.error("[看门狗] 保活循环卡住超过120秒，强制重启进程...")
+                if time.monotonic() - self._loop_heartbeat > self._watchdog_timeout_sec:
+                    log.error(
+                        "[看门狗] 保活循环超过%d秒没有阶段心跳，强制重启进程...",
+                        self._watchdog_timeout_sec,
+                    )
                     for h in log.handlers:
                         try: h.flush()
                         except Exception: pass
@@ -285,7 +291,9 @@ class TrayApp:
 
         while self._running:
             try:
+                self._touch_watchdog("开始网络检测")
                 snap = take_snapshot()
+                self._touch_watchdog("网络检测完成")
 
                 # 状态转换日志
                 if self._last_state != snap.state:
@@ -298,7 +306,10 @@ class TrayApp:
                     self._update_status("在线", "green")
                     self._consecutive_abnormal = 0
                     self._pending_abnormal = None
+                    self._touch_watchdog("开始流量查询")
                     self._update_traffic_info()
+                    self._touch_watchdog("流量查询完成")
+                    self._observe_interface_mode(snap)
 
                     if self._should_switch_back_to_ethernet(
                         snap.eth_connected, snap.wifi_connected
@@ -393,8 +404,32 @@ class TrayApp:
                 pass
 
             # 更新看门狗心跳
-            self._loop_heartbeat = time.time()
+            self._touch_watchdog("完成保活循环")
             time.sleep(CONFIG.network.poll_interval_sec)
+
+    def _touch_watchdog(self, phase: str) -> None:
+        """记录阶段心跳，避免慢速探测被误判为卡死。"""
+        self._loop_heartbeat = time.monotonic()
+        self._watchdog_phase = phase
+
+    def _observe_interface_mode(self, snap) -> None:
+        """根据当前接口状态推断 Wi-Fi 兜底，不依赖历史内存标志。"""
+        wifi_fallback = snap.wifi_connected and (
+            not snap.eth_connected or snap.eth_admin_enabled is False
+        )
+        if not wifi_fallback:
+            return
+
+        self._using_wifi_fallback = True
+        if snap.eth_admin_enabled is False:
+            now = time.monotonic()
+            if now - self._last_ethernet_enable_attempt < 60:
+                return
+            self._last_ethernet_enable_attempt = now
+            log.warning("[恢复:网线] 检测到以太网被管理员禁用，尝试启用")
+            self._update_status("启用以太网中...", "yellow")
+            if not enable_ethernet_adapter():
+                log.warning("[恢复:网线] 以太网启用失败，继续使用 Wi-Fi")
 
     def _recover_cable_down(self) -> None:
         """网线断开恢复"""

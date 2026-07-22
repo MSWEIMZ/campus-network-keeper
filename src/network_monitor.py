@@ -53,6 +53,7 @@ class NetworkSnapshot:
     gateway_reachable: bool
     internet_reachable: bool
     auth_probe_ok: bool
+    eth_admin_enabled: Optional[bool] = None
     detail: str = ""
 
 
@@ -95,13 +96,49 @@ def get_adapter_status(adapter_name: str) -> Optional[bool]:
     out = _run('netsh interface show interface')
     for line in out.splitlines():
         if adapter_name.lower() in line.lower():
-            lower = line.lower()
-            connected = (
-                "已连接" in line
-                or ("connected" in lower and "disconnected" not in lower)
-            )
+            connected = _parse_adapter_link_status(line)
             log.info("[探测:网卡] %s → %s | %s", adapter_name, "已连接" if connected else "已断开", line.strip()[:80])
             return connected
+    return None
+
+
+def _parse_adapter_link_status(line: str) -> bool:
+    """解析 netsh 链路状态，避免 disconnected 匹配 connected。"""
+    lower = line.lower()
+    return "已连接" in line or (
+        "connected" in lower and "disconnected" not in lower
+    )
+
+
+def get_adapter_admin_status(adapter_name: str) -> Optional[bool]:
+    """返回网卡是否被系统启用；None 表示未找到网卡。"""
+    out = _run("netsh interface show interface")
+    for line in out.splitlines():
+        if adapter_name.lower() not in line.lower():
+            continue
+        lower = line.lower().strip()
+        if lower.startswith("已启用") or lower.startswith("enabled"):
+            return True
+        if lower.startswith("已禁用") or lower.startswith("disabled"):
+            return False
+        return None
+    return None
+
+
+def is_ethernet_admin_enabled() -> Optional[bool]:
+    """检测以太网管理状态，区分禁用和物理断开。"""
+    name = CONFIG.ethernet_adapter_name
+    if name:
+        return get_adapter_admin_status(name)
+    out = _run("netsh interface show interface")
+    for line in out.splitlines():
+        lower = line.lower()
+        if any(kw in lower for kw in ("以太网", "ethernet")):
+            stripped = lower.strip()
+            if stripped.startswith("已启用") or stripped.startswith("enabled"):
+                return True
+            if stripped.startswith("已禁用") or stripped.startswith("disabled"):
+                return False
     return None
 
 
@@ -117,7 +154,7 @@ def is_ethernet_connected() -> bool:
     for line in out.splitlines():
         lower = line.lower()
         if any(kw in lower for kw in ("以太网", "ethernet")):
-            if "已连接" in line or ("connected" in lower and "disconnected" not in lower):
+            if _parse_adapter_link_status(line):
                 log.info("[探测:以太网] 已连接 | %s", line.strip()[:80])
                 return True
     log.info("[探测:以太网] 未连接")
@@ -136,7 +173,7 @@ def is_wifi_connected() -> bool:
     for line in out.splitlines():
         lower = line.lower()
         if any(kw in lower for kw in ("wi-fi", "wlan", "无线")):
-            if "已连接" in line or ("connected" in lower and "disconnected" not in lower):
+            if _parse_adapter_link_status(line):
                 log.info("[探测:Wi-Fi] 已连接 | %s", line.strip()[:80])
                 return True
     log.info("[探测:Wi-Fi] 未连接")
@@ -243,6 +280,7 @@ def take_snapshot() -> NetworkSnapshot:
             state=NetState.UNKNOWN, eth_connected=False, wifi_connected=False,
             has_ip=False, gateway=None, gateway_reachable=False,
             internet_reachable=False, auth_probe_ok=False,
+            eth_admin_enabled=None,
             detail=f"采集异常: {e}",
         )
 
@@ -250,6 +288,7 @@ def take_snapshot() -> NetworkSnapshot:
 def _do_take_snapshot() -> NetworkSnapshot:
     """实际的状态采集逻辑"""
     eth_ok = is_ethernet_connected()
+    eth_admin_enabled = is_ethernet_admin_enabled()
     wifi_ok = is_wifi_connected()
     has_ip = has_ipv4_address()
     gw = get_default_gateway()
@@ -300,6 +339,7 @@ def _do_take_snapshot() -> NetworkSnapshot:
         gateway_reachable=gw_ok,
         internet_reachable=inet_ok,
         auth_probe_ok=auth_ok,
+        eth_admin_enabled=eth_admin_enabled,
         detail=detail,
     )
 
@@ -307,9 +347,10 @@ def _do_take_snapshot() -> NetworkSnapshot:
 def log_snapshot(snap: NetworkSnapshot) -> None:
     """打印快照日志"""
     log.info(
-        "网络状态: %s | 网线=%s Wi-Fi=%s IP=%s 网关=%s(%s) 外网=%s 认证=%s | %s",
+        "网络状态: %s | 网线=%s(启用=%s) Wi-Fi=%s IP=%s 网关=%s(%s) 外网=%s 认证=%s | %s",
         snap.state.name,
         snap.eth_connected,
+        snap.eth_admin_enabled,
         snap.wifi_connected,
         snap.has_ip,
         snap.gateway or "-",

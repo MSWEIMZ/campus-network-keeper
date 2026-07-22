@@ -28,3 +28,10 @@ def test_auto_detection_retries_until_portal_is_visible(detect, create):
     assert router._ensure_auth() is None
     assert router._ensure_auth() is portal
     create.assert_called_once()
+
+
+@patch("campus_auth.CampusAuth._ensure_auth", return_value=None)
+def test_heartbeat_is_healthy_when_network_is_online_without_portal(ensure):
+    router = CampusAuth()
+
+    assert router.heartbeat() is True

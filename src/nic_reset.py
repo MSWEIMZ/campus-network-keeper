@@ -60,6 +60,15 @@ def enable_adapter(name: str) -> bool:
     return True
 
 
+def enable_ethernet_adapter() -> bool:
+    """仅启用被管理员禁用的以太网，不刷新 DHCP 或重置 Wi-Fi。"""
+    adapter = find_ethernet_adapter()
+    if not adapter:
+        log.error("未找到以太网适配器，无法启用")
+        return False
+    return enable_adapter(adapter)
+
+
 # ---------------------------------------------------------------------------
 # DHCP 刷新
 # ---------------------------------------------------------------------------

@@ -111,7 +111,8 @@ class CampusAuth:
         """心跳保活"""
         auth = self._ensure_auth()
         if auth is None:
-            return False
+            log.debug("[认证] 当前无认证页面，心跳视为正常")
+            return True
         try:
             return auth.heartbeat()
         except Exception as e:

@@ -26,6 +26,16 @@ def test_tray_initializes_lifecycle_state_and_tooltip_formatter():
     assert app._format_traffic_tooltip() == "已用: 1 GB\n余额: 10元"
 
 
+def test_watchdog_allows_slow_network_probe_and_tracks_phase():
+    app = TrayApp()
+
+    app._touch_watchdog("network probe")
+
+    assert app._watchdog_timeout_sec == 300
+    assert app._watchdog_phase == "network probe"
+    assert app._loop_heartbeat > 0
+
+
 @patch("campus_auth.CampusAuth")
 @patch("socket.getaddrinfo", side_effect=AssertionError("不应解析学校专用域名"))
 def test_login_does_not_depend_on_dlut_dns(getaddrinfo, auth_cls):
@@ -60,6 +70,18 @@ def test_ethernet_switch_requires_wifi_fallback_and_stability():
     assert app._should_switch_back_to_ethernet(True, True) is False
     assert app._should_switch_back_to_ethernet(True, True) is False
     assert app._should_switch_back_to_ethernet(True, True) is True
+
+
+@patch("tray.enable_ethernet_adapter", return_value=True)
+def test_wifi_online_with_disabled_ethernet_enables_adapter(enable_ethernet):
+    app = TrayApp()
+    snap = _snapshot(NetState.ONLINE, eth=False, wifi=True)
+    snap.eth_admin_enabled = False
+
+    app._observe_interface_mode(snap)
+
+    assert app._using_wifi_fallback is True
+    enable_ethernet.assert_called_once()
 
 
 @patch("time.sleep")
