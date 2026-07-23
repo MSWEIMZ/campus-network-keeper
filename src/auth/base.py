@@ -158,7 +158,12 @@ class BaseAuth(ABC):
         import subprocess
         import re
         try:
-            out = subprocess.run("ipconfig", shell=True, capture_output=True).stdout
+            out = subprocess.run(
+                "ipconfig",
+                shell=True,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
             text = out.decode("utf-8", errors="ignore")
             for line in text.split("\n"):
                 if "IPv4" in line:

@@ -27,6 +27,7 @@ def _set_metric(alias: str | None, metric: int) -> bool:
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode == 0:
             return True

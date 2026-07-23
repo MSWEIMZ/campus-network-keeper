@@ -672,7 +672,13 @@ class TrayApp:
 
         # Step2: 只有以太网确认可用后才断开 Wi-Fi。
         try:
-            subprocess.run("netsh wlan disconnect", shell=True, capture_output=True, timeout=10)
+            subprocess.run(
+                "netsh wlan disconnect",
+                shell=True,
+                capture_output=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         except Exception as e:
             log.warning("[恢复:网线优先] 断开WiFi失败: %s", e)
 

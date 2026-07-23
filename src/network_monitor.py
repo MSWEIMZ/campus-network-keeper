@@ -116,7 +116,11 @@ def _run(cmd: str, timeout: int = 10) -> str:
     """运行 shell 命令并返回 stdout"""
     try:
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, timeout=timeout
+            cmd,
+            shell=True,
+            capture_output=True,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
             try:
@@ -137,6 +141,7 @@ def _run_powershell(script: str, timeout: int = 10) -> str:
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         data = r.stdout or r.stderr
         for enc in ("utf-8", "gbk", "gb2312", "latin-1"):
