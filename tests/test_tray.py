@@ -84,6 +84,62 @@ def test_wifi_online_with_disabled_ethernet_enables_adapter(enable_ethernet):
     enable_ethernet.assert_called_once()
 
 
+@patch("tray.take_snapshot")
+@patch("subprocess.run")
+@patch("tray.TrayApp._prefer_wifi")
+@patch("tray.TrayApp._prefer_ethernet")
+def test_switchback_does_not_disconnect_wifi_before_ethernet_probe(
+    prefer_eth, prefer_wifi, run, snapshot
+):
+    app = TrayApp()
+    snapshot.return_value = _snapshot(NetState.ONLINE, eth=True, wifi=True)
+    snapshot.return_value.eth_internet_reachable = False
+    snapshot.return_value.eth_auth_probe_ok = False
+
+    app._switch_back_to_ethernet()
+
+    run.assert_not_called()
+    prefer_eth.assert_called_once()
+    prefer_wifi.assert_called_once()
+    assert app._using_wifi_fallback is True
+
+
+@patch("tray.take_snapshot")
+@patch("subprocess.run")
+@patch("tray.TrayApp._prefer_wifi")
+@patch("tray.TrayApp._prefer_ethernet")
+def test_switchback_disconnects_wifi_only_after_ethernet_is_verified(
+    prefer_eth, prefer_wifi, run, snapshot
+):
+    app = TrayApp()
+    first = _snapshot(NetState.ONLINE, eth=True, wifi=True)
+    first.eth_internet_reachable = True
+    second = _snapshot(NetState.ONLINE, eth=True, wifi=False)
+    second.eth_internet_reachable = True
+    snapshot.side_effect = [first, first, second]
+
+    app._switch_back_to_ethernet()
+
+    run.assert_called_once()
+    prefer_eth.assert_called_once()
+    prefer_wifi.assert_not_called()
+    assert app._using_wifi_fallback is False
+
+
+@patch("wifi_switcher.connect_wifi", return_value=True)
+@patch("wifi_switcher.list_available_ssids", return_value=[])
+@patch("wifi_switcher.list_saved_profiles", return_value=["saved-profile"])
+@patch("wifi_switcher.ensure_wifi_adapter_enabled", return_value=True)
+def test_wifi_fallback_uses_saved_profile_when_ssid_not_configured(
+    ensure, saved, available, connect
+):
+    import wifi_switcher
+
+    with patch.object(wifi_switcher.CONFIG, "wifi_ssids", []):
+        assert wifi_switcher.auto_connect_preferred_wifi() is True
+    connect.assert_called_once_with("saved-profile")
+
+
 @patch("time.sleep")
 @patch("wifi_switcher.auto_connect_preferred_wifi", return_value=True)
 @patch("nic_reset.reset_ethernet", return_value=True)

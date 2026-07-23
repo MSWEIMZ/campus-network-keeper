@@ -39,24 +39,24 @@ def find_ethernet_adapter() -> str | None:
 
 def disable_adapter(name: str) -> bool:
     """禁用网卡，返回是否真正禁用成功"""
-    log.info("正在禁用网卡: %s", name)
+    log.info("正在禁用以太网接口")
     out = _run(f'netsh interface set interface "{name}" admin=disable')
     # 检查是否有权限错误
     if "提升" in out or "elevation" in out.lower() or "denied" in out.lower():
-        log.warning("禁用网卡失败（需要管理员权限）: %s", name)
+        log.warning("禁用以太网失败（需要管理员权限）")
         return False
-    log.info("网卡已禁用: %s", name)
+    log.info("以太网接口已禁用")
     return True
 
 
 def enable_adapter(name: str) -> bool:
     """启用网卡，返回是否真正启用成功"""
-    log.info("正在启用网卡: %s", name)
+    log.info("正在启用以太网接口")
     out = _run(f'netsh interface set interface "{name}" admin=enable')
     if "提升" in out or "elevation" in out.lower() or "denied" in out.lower():
-        log.warning("启用网卡失败（需要管理员权限）: %s", name)
+        log.warning("启用以太网失败（需要管理员权限）")
         return False
-    log.info("网卡已启用: %s", name)
+    log.info("以太网接口已启用")
     return True
 
 
@@ -107,7 +107,7 @@ def reset_ethernet() -> bool:
         log.error("未找到以太网适配器，无法重置")
         return False
 
-    log.info("===== 开始重置以太网卡: %s =====", adapter)
+    log.info("===== 开始重置以太网接口 =====")
 
     # 禁用
     disabled = disable_adapter(adapter)

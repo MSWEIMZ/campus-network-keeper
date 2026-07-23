@@ -80,10 +80,10 @@ def diagnose() -> None:
     log.info("=" * 50)
 
     adapter = find_ethernet_adapter()
-    log.info("以太网适配器: %s", adapter or "(未找到)")
+    log.info("以太网适配器: %s", "已找到" if adapter else "未找到")
 
     ssids = list_available_ssids()
-    log.info("可扫描到的 Wi-Fi: %s", ssids if ssids else "(无)")
+    log.info("可扫描到的 Wi-Fi 数量: %d", len(ssids))
 
     snap = take_snapshot()
     log_snapshot(snap)

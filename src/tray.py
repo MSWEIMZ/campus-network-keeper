@@ -106,6 +106,9 @@ class TrayApp:
         self._using_wifi_fallback = False
         self._ethernet_stable_count = 0
         self._last_ethernet_enable_attempt = 0.0
+        self._last_ethernet_disable_attempt = 0.0
+        self._last_wifi_profiles: list[str] = []
+        self._route_mode: Optional[str] = None
         self._watchdog_timeout_sec = 300
 
     def _update_status(self, text: str, color: str = "green") -> None:
@@ -312,7 +315,7 @@ class TrayApp:
                     self._observe_interface_mode(snap)
 
                     if self._should_switch_back_to_ethernet(
-                        snap.eth_connected, snap.wifi_connected
+                        snap.eth_connected, snap.wifi_connected, snap
                     ):
                         self._switch_back_to_ethernet()
                         continue
@@ -413,14 +416,42 @@ class TrayApp:
         self._watchdog_phase = phase
 
     def _observe_interface_mode(self, snap) -> None:
-        """根据当前接口状态推断 Wi-Fi 兜底，不依赖历史内存标志。"""
-        wifi_fallback = snap.wifi_connected and (
-            not snap.eth_connected or snap.eth_admin_enabled is False
-        )
-        if not wifi_fallback:
-            return
+        """根据每个接口的真实探测结果管理主路径和 Wi-Fi 兜底。"""
+        eth_usable = bool(snap.eth_internet_reachable or snap.eth_auth_probe_ok)
+        wifi_usable = bool(snap.wifi_internet_reachable or snap.wifi_auth_probe_ok)
 
-        self._using_wifi_fallback = True
+        if snap.wifi_connected and (
+            not snap.eth_connected or snap.eth_admin_enabled is False
+        ):
+            self._using_wifi_fallback = True
+
+        # 记住当前 Wi-Fi 配置；即使配置文件没有填写 SSID，断线后也能重连原网络。
+        if snap.wifi_connected:
+            try:
+                from wifi_switcher import get_connected_ssid
+                profile = get_connected_ssid()
+                if profile:
+                    self._last_wifi_profiles = [profile]
+            except Exception:
+                pass
+
+        if self._using_wifi_fallback:
+            if not eth_usable and wifi_usable:
+                self._ethernet_stable_count = 0
+                self._prefer_wifi(snap)
+            elif eth_usable and not wifi_usable:
+                # Wi-Fi 已掉线时，若以太网真实可用，立即使用以太网。
+                self._using_wifi_fallback = False
+                self._ethernet_stable_count = 0
+                self._prefer_ethernet(snap)
+            # 两者都可用时保持 Wi-Fi 路由，等待连续稳定轮次后再切换。
+        elif eth_usable:
+            self._prefer_ethernet(snap)
+        elif wifi_usable:
+            self._using_wifi_fallback = True
+            self._ethernet_stable_count = 0
+            self._prefer_wifi(snap)
+
         if snap.eth_admin_enabled is False:
             now = time.monotonic()
             if now - self._last_ethernet_enable_attempt < 60:
@@ -431,11 +462,51 @@ class TrayApp:
             if not enable_ethernet_adapter():
                 log.warning("[恢复:网线] 以太网启用失败，继续使用 Wi-Fi")
 
+    def _prefer_ethernet(self, snap) -> bool:
+        if self._route_mode == "ethernet":
+            return True
+        from route_manager import prefer_ethernet
+        ok = prefer_ethernet(snap.eth_alias or CONFIG.ethernet_adapter_name or "以太网",
+                             snap.wifi_alias or CONFIG.wifi_adapter_name or "WLAN")
+        if ok:
+            self._route_mode = "ethernet"
+        return ok
+
+    def _prefer_wifi(self, snap) -> bool:
+        if self._route_mode == "wifi":
+            return True
+        from route_manager import prefer_wifi
+        ok = prefer_wifi(snap.eth_alias or CONFIG.ethernet_adapter_name or "以太网",
+                         snap.wifi_alias or CONFIG.wifi_adapter_name or "WLAN")
+        if ok:
+            self._route_mode = "wifi"
+            return True
+
+        # 没有管理员权限修改 metric 时，禁用故障以太网，确保 Wi-Fi 真正接管流量。
+        # 后续观察到管理员状态为禁用时，会按节流策略自动尝试重新启用。
+        now = time.monotonic()
+        if (
+            snap.eth_connected
+            and (snap.wifi_internet_reachable or snap.wifi_auth_probe_ok)
+            and now - self._last_ethernet_disable_attempt >= 60
+        ):
+            from nic_reset import disable_adapter
+            self._last_ethernet_disable_attempt = now
+            alias = snap.eth_alias or CONFIG.ethernet_adapter_name
+            if alias and disable_adapter(alias):
+                self._route_mode = "wifi"
+                log.warning("[路由] 无法调整 metric，已临时禁用故障以太网")
+                return True
+        return False
+
+    def _wifi_fallback(self) -> bool:
+        from wifi_switcher import auto_connect_preferred_wifi
+        return auto_connect_preferred_wifi(self._last_wifi_profiles)
+
     def _recover_cable_down(self) -> None:
         """网线断开恢复"""
         log.warning("[恢复:网线] ====== 开始网线恢复流程 ======")
         from nic_reset import reset_ethernet
-        from wifi_switcher import auto_connect_preferred_wifi
 
         # 第 1 步：重置网卡
         log.info("[恢复:网线] Step1: 尝试重置网卡...")
@@ -456,7 +527,7 @@ class TrayApp:
         # 第 2 步：切 Wi-Fi
         log.info("[恢复:网线] Step2: 切换 Wi-Fi...")
         self._update_status("切换 Wi-Fi...", "yellow")
-        wifi_ok = auto_connect_preferred_wifi()
+        wifi_ok = self._wifi_fallback()
 
         if wifi_ok:
             time.sleep(5)
@@ -483,6 +554,16 @@ class TrayApp:
         if snap is None:
             snap = take_snapshot()
 
+        eth_usable = bool(snap.eth_internet_reachable or snap.eth_auth_probe_ok)
+        wifi_usable = bool(snap.wifi_internet_reachable or snap.wifi_auth_probe_ok)
+
+        # 两张网卡都连接但只有 Wi-Fi 可用时，不重置或断开 Wi-Fi，先让它接管路由。
+        if wifi_usable and not eth_usable:
+            self._using_wifi_fallback = True
+            self._prefer_wifi(snap)
+            self._update_status("在线 (Wi-Fi)", "green")
+            return
+
         # WiFi 在线但网关不通 → 不要 reset_ethernet（会把 WiFi 也断了）
         # 而是先尝试认证登录
         if snap.wifi_connected and not snap.eth_connected:
@@ -493,8 +574,7 @@ class TrayApp:
                     return
             # 认证失败，可能是 WiFi 信号问题
             log.warning("[恢复:DHCP] 认证失败，尝试重连 WiFi...")
-            from wifi_switcher import auto_connect_preferred_wifi
-            auto_connect_preferred_wifi()
+            self._wifi_fallback()
             time.sleep(5)
             snap2 = take_snapshot()
             if snap2.state == NetState.ONLINE:
@@ -510,14 +590,26 @@ class TrayApp:
         time.sleep(3)
         snap = take_snapshot()
         log.info("[恢复:DHCP] 刷新后状态: %s", snap.state.name)
+        if snap.wifi_internet_reachable or snap.wifi_auth_probe_ok:
+            self._using_wifi_fallback = not (
+                snap.eth_internet_reachable or snap.eth_auth_probe_ok
+            )
+            if self._using_wifi_fallback:
+                self._prefer_wifi(snap)
+                self._update_status("在线 (Wi-Fi)", "green")
+                return
         if snap.state == NetState.WEB_AUTH_REQUIRED:
             if CONFIG.auth.enabled:
                 self._do_login(CONFIG.auth.username, CONFIG.auth.password)
+        elif not (snap.eth_internet_reachable or snap.eth_auth_probe_ok):
+            log.warning("[恢复:DHCP] 以太网仍不可用，尝试启用 Wi-Fi 兜底")
+            if self._wifi_fallback():
+                self._using_wifi_fallback = True
+                self._prefer_wifi(snap)
 
     def _recover_auth_failed(self) -> None:
         """认证登录失败后的恢复：尝试网卡重置 + 切换 WiFi"""
         from nic_reset import reset_ethernet
-        from wifi_switcher import auto_connect_preferred_wifi
 
         # Step1: 尝试重置网卡
         log.warning("[恢复:认证失败] Step1: 尝试重置网卡...")
@@ -540,7 +632,7 @@ class TrayApp:
         # Step2: 切换 WiFi
         log.warning("[恢复:认证失败] Step2: 切换 Wi-Fi...")
         self._update_status("切换 Wi-Fi...", "yellow")
-        wifi_ok = auto_connect_preferred_wifi()
+        wifi_ok = self._wifi_fallback()
         if wifi_ok:
             time.sleep(5)
             snap2 = take_snapshot()
@@ -559,23 +651,37 @@ class TrayApp:
         self._update_status("恢复失败", "red")
 
     def _switch_back_to_ethernet(self) -> None:
-        """WiFi 在线时检测到网线恢复，切回网线"""
+        """先验证以太网真实可用，再断开 Wi-Fi，失败时立即恢复 Wi-Fi。"""
         import subprocess
-        log.info("[恢复:网线优先] 断开 Wi-Fi，切回以太网...")
+        log.info("[恢复:网线优先] 开始验证以太网，不先断开 Wi-Fi...")
 
-        # Step1: 断开 WiFi
+        # Step1: 先让以太网获得路由优先级，但保留 Wi-Fi 作为保护。
+        before = take_snapshot()
+        self._prefer_ethernet(before)
+        time.sleep(1)
+        snap = take_snapshot()
+        log.info("[恢复:网线优先] 验证结果: eth=%s wifi=%s eth_internet=%s eth_auth=%s",
+                 snap.eth_connected, snap.wifi_connected,
+                 snap.eth_internet_reachable, snap.eth_auth_probe_ok)
+
+        if not (snap.eth_connected and (snap.eth_internet_reachable or snap.eth_auth_probe_ok)):
+            log.warning("[恢复:网线优先] 以太网尚未验证可用，保持 Wi-Fi")
+            self._using_wifi_fallback = True
+            self._prefer_wifi(snap)
+            return
+
+        # Step2: 只有以太网确认可用后才断开 Wi-Fi。
         try:
             subprocess.run("netsh wlan disconnect", shell=True, capture_output=True, timeout=10)
         except Exception as e:
             log.warning("[恢复:网线优先] 断开WiFi失败: %s", e)
 
-        # Step2: 等待网线接管
-        time.sleep(5)
+        time.sleep(2)
         snap = take_snapshot()
         log.info("[恢复:网线优先] 切换后状态: eth=%s wifi=%s state=%s",
                  snap.eth_connected, snap.wifi_connected, snap.state.name)
 
-        if snap.state == NetState.ONLINE and snap.eth_connected:
+        if snap.eth_connected and (snap.eth_internet_reachable or snap.eth_auth_probe_ok):
             log.info("[恢复:网线优先] ✅ 已切回网线")
             self._update_status("在线", "green")
             self._consecutive_abnormal = 0
@@ -583,18 +689,14 @@ class TrayApp:
             self._ethernet_stable_count = 0
             return
 
-        if snap.state == NetState.WEB_AUTH_REQUIRED:
-            log.info("[恢复:网线优先] 切回网线后需要认证...")
-            if self._do_login(CONFIG.auth.username, CONFIG.auth.password):
-                return
-
-        # 切回失败，重新连 WiFi
-        log.warning("[恢复:网线优先] 切回网线失败，重新连接 WiFi...")
-        from wifi_switcher import auto_connect_preferred_wifi
-        auto_connect_preferred_wifi()
+        # Step3: 切回失败，恢复 Wi-Fi 和路由优先级。
+        log.warning("[恢复:网线优先] 切回网线失败，恢复 Wi-Fi...")
+        self._using_wifi_fallback = True
+        self._prefer_wifi(snap)
+        self._wifi_fallback()
         time.sleep(5)
         snap2 = take_snapshot()
-        if snap2.state == NetState.ONLINE:
+        if snap2.wifi_internet_reachable or snap2.wifi_auth_probe_ok:
             self._using_wifi_fallback = True
             self._update_status("在线 (Wi-Fi)", "green")
             return
@@ -606,13 +708,18 @@ class TrayApp:
         self._update_status("切回待定", "yellow")
 
     def _should_switch_back_to_ethernet(
-        self, eth_connected: bool, wifi_connected: bool
+        self, eth_connected: bool, wifi_connected: bool, snap=None
     ) -> bool:
-        """仅在 Wi-Fi 兜底期间且网线连续三轮稳定时切回。"""
+        """仅在 Wi-Fi 兜底期间且网线连续三轮真实可用时切回。"""
         if not self._using_wifi_fallback:
             self._ethernet_stable_count = 0
             return False
         if not eth_connected or not wifi_connected:
+            self._ethernet_stable_count = 0
+            return False
+        if snap is not None and not (
+            snap.eth_internet_reachable or snap.eth_auth_probe_ok
+        ):
             self._ethernet_stable_count = 0
             return False
         self._ethernet_stable_count += 1

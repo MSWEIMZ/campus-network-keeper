@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from network_monitor import (
+    _InterfaceConfig,
     NetState,
     NetworkSnapshot,
     get_adapter_status,
@@ -54,6 +55,7 @@ class TestNetStateEnum:
 
 class TestSnapshotDetermination:
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=True)
     @patch('network_monitor.probe_internet', return_value=True)
     @patch('network_monitor._ping', return_value=True)
@@ -65,6 +67,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.ONLINE
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=False)
     @patch('network_monitor.probe_internet', return_value=False)
     @patch('network_monitor._ping', return_value=False)
@@ -76,6 +79,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.CABLE_DOWN
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=False)
     @patch('network_monitor.probe_internet', return_value=False)
     @patch('network_monitor._ping', return_value=False)
@@ -87,6 +91,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.DHCP_LIMITED
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=True)
     @patch('network_monitor.probe_internet', return_value=False)
     @patch('network_monitor._ping', return_value=True)
@@ -98,6 +103,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.ONLINE
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=False)
     @patch('network_monitor.probe_internet', return_value=False)
     @patch('network_monitor._ping', return_value=True)
@@ -110,6 +116,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.WEB_AUTH_REQUIRED
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=False)
     @patch('network_monitor.probe_internet', return_value=False)
     @patch('network_monitor._ping', return_value=False)
@@ -122,6 +129,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.DHCP_LIMITED
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', return_value=False)
     @patch('network_monitor.probe_internet', return_value=False)
     @patch('network_monitor._ping', return_value=False)
@@ -134,6 +142,7 @@ class TestSnapshotDetermination:
         snap = take_snapshot()
         assert snap.state == NetState.WEB_AUTH_REQUIRED
 
+    @patch('network_monitor._get_interface_configs', return_value=[])
     @patch('network_monitor.probe_auth_page', side_effect=Exception("timeout"))
     @patch('network_monitor.probe_internet', side_effect=Exception("timeout"))
     @patch('network_monitor._ping', return_value=False)
@@ -157,3 +166,25 @@ class TestSnapshotDataclass:
         )
         assert snap.state == NetState.ONLINE
         assert snap.detail == "正常"
+
+
+@patch('network_monitor.is_ethernet_connected', return_value=True)
+@patch('network_monitor.is_wifi_connected', return_value=True)
+@patch('network_monitor.is_ethernet_admin_enabled', return_value=True)
+@patch('network_monitor._ping', side_effect=[True, True])
+@patch('network_monitor.probe_internet', side_effect=[False, True])
+@patch('network_monitor.probe_auth_page', return_value=False)
+@patch('network_monitor._get_interface_configs', return_value=[
+    _InterfaceConfig('Ethernet', '10.0.0.10', '10.0.0.1'),
+    _InterfaceConfig('WLAN', '192.168.0.10', '192.168.0.1'),
+])
+def test_wifi_is_reported_as_fallback_when_ethernet_has_no_internet(*mocks):
+    """双网卡同时连接时，Wi-Fi 可用不能掩盖以太网无外网。"""
+    snap = take_snapshot()
+
+    assert snap.state == NetState.ONLINE
+    assert snap.eth_connected is True
+    assert snap.eth_internet_reachable is False
+    assert snap.wifi_internet_reachable is True
+    assert snap.active_interface == "wifi"
+    assert "Wi-Fi" in snap.detail

@@ -22,8 +22,22 @@ def list_available_ssids() -> list[str]:
             ssid = line.split(":", 1)[1].strip()
             if ssid:
                 ssids.append(ssid)
-    log.info("[Wi-Fi] 扫描到 %d 个 SSID: %s", len(ssids), ssids if ssids else "(无)")
+    log.info("[Wi-Fi] 扫描到 %d 个 SSID", len(ssids))
     return ssids
+
+
+def list_saved_profiles() -> list[str]:
+    """读取本机已保存的 Wi-Fi 配置名，作为未配置 SSID 时的最后兜底。"""
+    out = _run("netsh wlan show profiles")
+    profiles: list[str] = []
+    for line in out.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if ("all user profile" in lower or "所有用户配置文件" in stripped) and ":" in stripped:
+            name = stripped.split(":", 1)[1].strip()
+            if name:
+                profiles.append(name)
+    return profiles
 
 
 def get_connected_ssid() -> str | None:
@@ -40,7 +54,7 @@ def get_connected_ssid() -> str | None:
         if connected and ("ssid" in lower and "bssid" not in lower) and ":" in stripped:
             ssid = stripped.split(":", 1)[1].strip()
             if ssid:
-                log.info("[Wi-Fi] 当前已连接 SSID: %s", ssid)
+                log.info("[Wi-Fi] 当前已连接无线网络")
                 return ssid
     log.info("[Wi-Fi] 当前未连接任何 SSID")
     return None
@@ -51,20 +65,21 @@ def disconnect_wifi() -> bool:
     log.info("[Wi-Fi] 正在断开 Wi-Fi...")
     out = _run("netsh wlan disconnect")
     ok = "确定" in out or "Ok" in out or out.strip() == ""
-    log.info("[Wi-Fi] 断开结果: %s (输出: %s)", "成功" if ok else "失败", out.strip()[:100])
+    log.info("[Wi-Fi] 断开结果: %s", "成功" if ok else "失败")
     return ok
 
 
 def connect_wifi(ssid: str, timeout_sec: int | None = None) -> bool:
     """连接指定 SSID 的 Wi-Fi"""
     timeout = timeout_sec or CONFIG.network.wifi_connect_timeout_sec
-    log.info("[Wi-Fi] ========== 连接 Wi-Fi: %s (超时 %ds) ==========", ssid, timeout)
+    log.info("[Wi-Fi] ========== 连接 Wi-Fi (超时 %ds) ==========", timeout)
 
-    out = _run(f'netsh wlan connect name="{ssid}"')
-    log.info("[Wi-Fi] netsh connect 输出: %s", out.strip()[:200])
+    safe_ssid = ssid.replace('"', "")
+    out = _run(f'netsh wlan connect name="{safe_ssid}"')
+    log.info("[Wi-Fi] 已发送连接请求")
 
     if "已成功" not in out and "success" not in out.lower() and out.strip() != "":
-        log.warning("[Wi-Fi] 连接命令返回异常: %s", out.strip())
+        log.warning("[Wi-Fi] 连接命令返回异常")
 
     # 等待连接
     log.info("[Wi-Fi] 等待连接建立...")
@@ -77,15 +92,14 @@ def connect_wifi(ssid: str, timeout_sec: int | None = None) -> bool:
         if current:
             if current.lower() == ssid.lower():
                 elapsed = time.time() - start
-                log.info("[Wi-Fi] ✅ Wi-Fi 已连接: %s (耗时 %.1fs)", ssid, elapsed)
+                log.info("[Wi-Fi] ✅ Wi-Fi 已连接 (耗时 %.1fs)", elapsed)
                 return True
-            else:
-                log.warning("[Wi-Fi] ⚠️ 连接到了其他 SSID: %s (期望 %s)", current, ssid)
-                return False
+            log.warning("[Wi-Fi] ⚠️ 连接到了其他无线网络，停止本次尝试")
+            return False
         if attempt % 3 == 0:
             log.info("[Wi-Fi] 仍在等待连接... (已等 %.0fs)", time.time() - start)
 
-    log.warning("[Wi-Fi] ❌ 连接超时: %s (%ds)", ssid, timeout)
+    log.warning("[Wi-Fi] ❌ 连接超时 (%ds)", timeout)
     return False
 
 
@@ -100,7 +114,7 @@ def _get_wifi_radio_state() -> str:
         if "ssid" in lower and "bssid" not in lower and ":" in line:
             ssid_val = line.split(":", 1)[1].strip()
             if ssid_val:
-                log.info("[Wi-Fi:射频] 检测到已连接 SSID '%s'，射频肯定是开的", ssid_val)
+                log.info("[Wi-Fi:射频] 检测到已连接无线网络，射频肯定是开的")
                 return "Software On"
 
     # 检查 Radio status 行
@@ -127,7 +141,7 @@ def _get_wifi_radio_state() -> str:
         return "Software Off"
 
     log.info("[Wi-Fi:射频] 无法确定射频状态 (unknown)")
-    log.info("[Wi-Fi:射频] netsh 输出前300字符: %s", out[:300])
+    log.info("[Wi-Fi:射频] 无法确定射频状态")
     return "unknown"
 
 
@@ -254,15 +268,18 @@ def ensure_wifi_adapter_enabled() -> bool:
         return False
 
 
-def auto_connect_preferred_wifi() -> bool:
+def auto_connect_preferred_wifi(preferred_ssids: list[str] | None = None) -> bool:
     """按优先级列表依次尝试连接 Wi-Fi"""
-    ssids = CONFIG.network.wifi_ssids
+    ssids = list(preferred_ssids or CONFIG.network.wifi_ssids)
     log.info("[Wi-Fi] ========== 自动连接 Wi-Fi ==========")
-    log.info("[Wi-Fi] 优先级列表: %s", ssids)
+    log.info("[Wi-Fi] 候选网络数量: %d", len(ssids))
 
     if not ssids:
-        log.warning("[Wi-Fi] 未配置备用 Wi-Fi SSID，跳过")
-        return False
+        ssids = list_saved_profiles()
+        log.info("[Wi-Fi] 未配置备用 SSID，使用已保存配置数量: %d", len(ssids))
+        if not ssids:
+            log.warning("[Wi-Fi] 没有可用的已保存 Wi-Fi 配置")
+            return False
 
     # 确保 Wi-Fi 适配器开启
     log.info("[Wi-Fi] Step1: 检查 Wi-Fi 适配器...")
@@ -280,17 +297,17 @@ def auto_connect_preferred_wifi() -> bool:
     log.info("[Wi-Fi] Step3: 按优先级连接...")
     for ssid in ssids:
         if ssid in available:
-            log.info("[Wi-Fi] 发现目标 SSID: %s，开始连接...", ssid)
+            log.info("[Wi-Fi] 发现候选无线网络，开始连接...")
             if connect_wifi(ssid):
                 return True
         else:
-            log.info("[Wi-Fi] SSID '%s' 不在扫描列表中，跳过", ssid)
+            log.info("[Wi-Fi] 候选无线网络当前不可见，跳过")
 
     # 如果扫描列表为空，直接连接已保存 Profile
     if not available:
         log.info("[Wi-Fi] Step4: 扫描列表为空，尝试直接连接已保存 Profile...")
         for ssid in ssids:
-            log.info("[Wi-Fi] 尝试直接连接: %s", ssid)
+            log.info("[Wi-Fi] 尝试直接连接已保存无线配置")
             if connect_wifi(ssid):
                 return True
 

@@ -46,6 +46,11 @@ class Config:
         self.nic_disable_wait: int = 4           # 网卡禁用等待（秒）
         self.wifi_ssids: List[str] = []          # Wi-Fi SSID 列表
         self.wifi_timeout: int = 20              # Wi-Fi 连接超时（秒）
+        # 运行时路由优先级（只写入 Windows ActiveStore，重启后恢复系统默认）
+        self.ethernet_metric: int = 25
+        self.wifi_metric: int = 55
+        self.fallback_ethernet_metric: int = 5000
+        self.route_metric_enabled: bool = True
 
         # ---------- 应用配置 ----------
         self.log_level: str = "INFO"
@@ -94,6 +99,14 @@ class Config:
             self.poll_interval = cp.getint("network", "poll_interval", fallback=self.poll_interval)
             self.confirm_count = cp.getint("network", "confirm_count", fallback=self.confirm_count)
             self.wifi_timeout = cp.getint("network", "wifi_timeout", fallback=self.wifi_timeout)
+            self.ethernet_metric = cp.getint("network", "ethernet_metric", fallback=self.ethernet_metric)
+            self.wifi_metric = cp.getint("network", "wifi_metric", fallback=self.wifi_metric)
+            self.fallback_ethernet_metric = cp.getint(
+                "network", "fallback_ethernet_metric", fallback=self.fallback_ethernet_metric
+            )
+            self.route_metric_enabled = cp.getboolean(
+                "network", "route_metric_enabled", fallback=self.route_metric_enabled
+            )
             ssids_str = cp.get("network", "wifi_ssids", fallback="")
             if ssids_str:
                 self.wifi_ssids = [s.strip() for s in ssids_str.split(",") if s.strip()]
@@ -142,6 +155,10 @@ class Config:
         cp.set("network", "confirm_count", str(self.confirm_count))
         cp.set("network", "wifi_ssids", ", ".join(self.wifi_ssids))
         cp.set("network", "wifi_timeout", str(self.wifi_timeout))
+        cp.set("network", "ethernet_metric", str(self.ethernet_metric))
+        cp.set("network", "wifi_metric", str(self.wifi_metric))
+        cp.set("network", "fallback_ethernet_metric", str(self.fallback_ethernet_metric))
+        cp.set("network", "route_metric_enabled", str(self.route_metric_enabled))
 
         cp.add_section("app")
         cp.set("app", "log_level", self.log_level)
@@ -186,6 +203,14 @@ class Config:
         def wifi_ssids(self): return self._cfg.wifi_ssids
         @property
         def wifi_connect_timeout_sec(self): return self._cfg.wifi_timeout
+        @property
+        def ethernet_metric(self): return self._cfg.ethernet_metric
+        @property
+        def wifi_metric(self): return self._cfg.wifi_metric
+        @property
+        def fallback_ethernet_metric(self): return self._cfg.fallback_ethernet_metric
+        @property
+        def route_metric_enabled(self): return self._cfg.route_metric_enabled
         @property
         def auth_probe_url(self): return self._cfg.auth_probe_url
         @property

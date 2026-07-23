@@ -24,6 +24,8 @@ class KeepAlive:
         self._retry_count: int = 0
         self._last_state: NetState = NetState.UNKNOWN
         self._pending_abnormal: NetState = NetState.UNKNOWN
+        self._using_wifi_fallback = False
+        self._last_wifi_profiles: list[str] = []
 
         # 从环境变量或配置读取账号密码
         self._username = os.environ.get("CAMPUS_USER", CONFIG.auth.username)
@@ -84,6 +86,26 @@ class KeepAlive:
         self._retry_count = 0
         self._last_state = NetState.ONLINE
         self._pending_abnormal = NetState.UNKNOWN
+
+        eth_usable = snap.eth_internet_reachable or snap.eth_auth_probe_ok
+        wifi_usable = snap.wifi_internet_reachable or snap.wifi_auth_probe_ok
+        try:
+            from route_manager import prefer_ethernet, prefer_wifi
+            if snap.wifi_connected:
+                from wifi_switcher import get_connected_ssid
+                current = get_connected_ssid()
+                if current:
+                    self._last_wifi_profiles = [current]
+            eth_alias = snap.eth_alias or CONFIG.ethernet_adapter_name or "以太网"
+            wifi_alias = snap.wifi_alias or CONFIG.wifi_adapter_name or "WLAN"
+            if eth_usable:
+                prefer_ethernet(eth_alias, wifi_alias)
+                self._using_wifi_fallback = False
+            elif wifi_usable:
+                prefer_wifi(eth_alias, wifi_alias)
+                self._using_wifi_fallback = True
+        except Exception as exc:
+            log.warning("路由优先级调整失败: %s", type(exc).__name__)
 
         # 认证保活心跳
         if CONFIG.auth.enabled:
@@ -159,7 +181,7 @@ class KeepAlive:
                 return
 
         log.warning("网卡重置未恢复，尝试连接备用 Wi-Fi...")
-        if auto_connect_preferred_wifi():
+        if auto_connect_preferred_wifi(self._last_wifi_profiles):
             time.sleep(3)
             new_snap = take_snapshot()
             log_snapshot(new_snap)
@@ -174,6 +196,15 @@ class KeepAlive:
 
     def _recover_dhcp_limited(self, snap: NetworkSnapshot) -> None:
         """有 IP 但无法上网"""
+        if (snap.wifi_internet_reachable or snap.wifi_auth_probe_ok) and not (
+            snap.eth_internet_reachable or snap.eth_auth_probe_ok
+        ):
+            from route_manager import prefer_wifi
+            prefer_wifi(snap.eth_alias or CONFIG.ethernet_adapter_name or "以太网",
+                        snap.wifi_alias or CONFIG.wifi_adapter_name or "WLAN")
+            self._using_wifi_fallback = True
+            log.info("Wi-Fi 已验证可用，保持 Wi-Fi 作为兜底")
+            return
         log.warning("⚠️ 有 IP 但无法上网，尝试刷新 DHCP...")
         reset_ethernet()
 
@@ -186,6 +217,14 @@ class KeepAlive:
             self._do_login()
         else:
             log.warning("DHCP 刷新后仍无法上网")
+            if auto_connect_preferred_wifi(self._last_wifi_profiles):
+                time.sleep(3)
+                fallback = take_snapshot()
+                if fallback.wifi_internet_reachable or fallback.wifi_auth_probe_ok:
+                    from route_manager import prefer_wifi
+                    prefer_wifi(fallback.eth_alias or CONFIG.ethernet_adapter_name or "以太网",
+                                fallback.wifi_alias or CONFIG.wifi_adapter_name or "WLAN")
+                    self._using_wifi_fallback = True
 
     def _recover_auth_required(self, snap: NetworkSnapshot) -> None:
         """需要 Web 认证"""

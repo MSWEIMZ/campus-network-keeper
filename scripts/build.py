@@ -64,7 +64,7 @@ def build():
         "pystray", "PIL", "PIL.Image", "PIL.ImageDraw",
         "requests", "des_crypto", "campus_auth", "config", "logger",
         "network_monitor", "nic_reset", "wifi_switcher", "keepalive",
-        "tray", "wizard", "main",
+        "tray", "route_manager", "wizard", "main",
         "auth", "auth.base", "auth.detector", "auth.drcom",
         "auth.ruijie", "auth.srun", "auth.portal",
     ]
