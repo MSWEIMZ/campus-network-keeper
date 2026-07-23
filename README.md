@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Campus_Network_Keeper-v1.0.8-blue?style=for-the-badge" alt="version">
+  <img src="https://img.shields.io/badge/Campus_Network_Keeper-v1.0.9-blue?style=for-the-badge" alt="version">
 </p>
 
 <p align="center">

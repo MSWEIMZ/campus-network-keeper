@@ -50,7 +50,8 @@ def build():
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", "CampusNetworkKeeper",
-        "--console",
+        # 托盘发布版不应在双击时绑定控制台窗口；运行状态写入日志。
+        "--windowed",
         "--add-data", f"{SRC_DIR}{os.pathsep}.",
         "--clean",
         MAIN_SCRIPT,
