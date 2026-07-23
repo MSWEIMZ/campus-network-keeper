@@ -310,7 +310,11 @@ def main() -> None:
         print(f"  认证: {'启用' if CONFIG.auth.enabled else '未启用'}")
         print(f"  Wi-Fi: {CONFIG.network.wifi_ssids}")
     else:
-        run_keepalive()
+        # 双击打包 EXE 时直接进入托盘；源码无参数运行仍保留命令行保活模式。
+        if getattr(sys, "frozen", False):
+            run_tray()
+        else:
+            run_keepalive()
 
 
 if __name__ == "__main__":
