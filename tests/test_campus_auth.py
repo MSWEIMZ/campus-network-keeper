@@ -30,6 +30,18 @@ def test_auto_detection_retries_until_portal_is_visible(detect, create):
     create.assert_called_once()
 
 
+@patch("campus_auth.create_auth_instance")
+@patch("campus_auth.detect_auth_system", return_value=(AuthSystemType.UNKNOWN, "", ""))
+def test_auto_detection_falls_back_after_repeated_outage(detect, create):
+    fallback = Mock()
+    create.return_value = fallback
+    router = CampusAuth()
+
+    assert router._ensure_auth() is None
+    assert router._ensure_auth() is fallback
+    create.assert_called_once_with(AuthSystemType.DRCOM, create.call_args.args[1])
+
+
 @patch("campus_auth.CampusAuth._ensure_auth", return_value=None)
 def test_heartbeat_is_healthy_when_network_is_online_without_portal(ensure):
     router = CampusAuth()

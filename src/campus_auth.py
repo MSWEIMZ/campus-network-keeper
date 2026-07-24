@@ -24,6 +24,9 @@ class CampusAuth:
         self._auth: Optional[BaseAuth] = None
         self._auth_type: AuthSystemType = AuthSystemType.UNKNOWN
         self._initialized = False
+        # 自动探测在欠费/认证网关暂时不可达时会返回 UNKNOWN。连续失败后
+        # 不能永远停留在“未初始化”，否则恢复循环只会反复探测而从不登录。
+        self._unknown_detections = 0
 
     def _ensure_auth(self) -> Optional[BaseAuth]:
         """延迟初始化认证实例"""
@@ -52,12 +55,18 @@ class CampusAuth:
             log.info("[认证] 自动探测认证系统...")
             system_type, redirect_url, _ = detect_auth_system()
             if system_type == AuthSystemType.UNKNOWN:
-                # 在线状态和暂时无法访问认证页时都可能得到 UNKNOWN。
-                # 此时猜测 Dr.COM 会让其他学校在后续掉线时使用错误模板；
-                # 保持未初始化，让下一次真正出现 Portal 时重新探测。
-                log.info("[认证] 当前未发现认证页面，暂不锁定认证模板")
-                self._initialized = False
-                return None
+                self._unknown_detections += 1
+                # 在线状态下保持 UNKNOWN，避免错误锁定模板；但断网恢复期间
+                # 若认证页一直不可探测，使用项目默认的 DLUT Dr.COM 模板兜底，
+                # 让登录请求真正发出。下次检测到明确 Portal 时仍会优先使用它。
+                if self._unknown_detections < 2:
+                    log.info("[认证] 当前未发现认证页面，暂不锁定认证模板")
+                    self._initialized = False
+                    return None
+                system_type = AuthSystemType.DRCOM
+                log.warning("[认证] 连续无法探测认证页面，使用 Dr.COM 模板兜底重试")
+            else:
+                self._unknown_detections = 0
             self._auth_type = system_type
             self._auth = create_auth_instance(system_type, auth_config)
         else:
